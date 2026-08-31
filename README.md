@@ -6,3 +6,5 @@ Once finished training, it's looking to be around 111M in size. I might put it o
 ## Results: 
 
 ## Training Logs/Other Information: 
+
+## Comparison: Female Fine-tune vs. Female Authors From Scratch
