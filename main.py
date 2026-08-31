@@ -3,13 +3,24 @@ Not completed yet, but the script should be pretty similar code-wise to my Poetr
 As always, a line of hashtags denotes the presence of a separate cell. 
 """
 # Import/installation cell: 
-!pip install -q transformers datasets tokenizers accelerate torch
+!pip install -q transformers datasets tokenizers accelerate torch requests flash-attn --no-build-isolation
 
 import os
+import re
+import requests
 import torch
-from datasets import load_dataset
+from concurrent.futures import ThreadPoolExecutor
+from datasets import Dataset
 from tokenizers import ByteLevelBPETokenizer
-from transformers import PreTrainedTokenizerFast, GPT2Config, GPT2LMHeadModel, DataCollatorForLanguageModeling, Trainer, TrainingArguments
+from transformers import (
+    PreTrainedTokenizerFast,
+    GPT2Config,
+    GPT2LMHeadModel,
+    DataCollatorForLanguageModeling,
+    Trainer,
+    TrainingArguments,
+    TrainerCallback
+)
 
 #####################################################################
 
