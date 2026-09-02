@@ -6,5 +6,6 @@ Once finished training, it's looking to be around 111M in size. I might put it o
 ## Results: 
 
 ## Training Logs/Other Information: 
+After training on a smaller dataset (around 72 books) for a few epochs, I decided to put the actual run in abeyance while gathering more books. 
 
 ## Comparison: Female Fine-tune vs. Female Authors From Scratch
