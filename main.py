@@ -1,5 +1,6 @@
 """
 Not completed yet, but the script should be pretty similar code-wise to my Poetry50M repository. 
+The greatest difference in running the generations for both should be the difference between a simple title/author input and the input of a piece of prose to be continued. 
 As always, a line of hashtags denotes the presence of a separate cell. 
 """
 # Import/installation cell: 
