@@ -1,5 +1,6 @@
-#!/usr/bin/env python3
-"""Download, audit, and prepare a Gutenberg corpus. Python 3.10+, no dependencies."""
+"""Download, audit, and prepare a Gutenberg corpus. Python 3.10+, no dependencies.
+    Trying to be extra careful with the parser since this is a from-scratch model. 
+"""
 from __future__ import annotations
 
 import argparse
