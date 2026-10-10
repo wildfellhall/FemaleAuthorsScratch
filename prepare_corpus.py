@@ -265,6 +265,7 @@ def anchor_position(text: str, spec: dict) -> int:
     return positions[occurrence - 1]
 
 
+# Needs definite enhancement
 def trim_to_narrative(text: str, rules: dict, audit: list) -> tuple[str, list[str], str]:
     problems = []
     method = "explicit"
