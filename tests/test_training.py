@@ -44,10 +44,9 @@ class TrainingTests(unittest.TestCase):
         exec(CELLS[3], scope)
         sources, self.raw = [], {}
         for index, split in enumerate(("train", "validation", "test")):
-            group = next(f"fixture-{i}" for i in range(10000)
-                         if corpus.split_for(f"fixture-{i}", "gutenberg-corpus-v1", .05, .05) == split)
-            book_id = str(123 + index)
-            sources.append({"url": f"https://www.gutenberg.org/ebooks/{book_id}", "work_id": group})
+            book_id = next(str(i) for i in range(1, 10000)
+                           if corpus.split_for(str(i), "gutenberg-corpus-v1", .05, .05) == split)
+            sources.append(f"https://www.gutenberg.org/ebooks/{book_id}")
             text = NARRATIVE.replace("Mira", ("Mira", "Valeria Ω", "Zelda Ж")[index])
             self.raw[book_id] = book_bytes(text, book_id)
         scope["sources"] = sources

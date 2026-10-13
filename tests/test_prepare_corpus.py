@@ -324,20 +324,23 @@ class CleaningTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
-    def test_growth_and_grouping_are_independent_of_list_length(self):
+    def test_url_list_growth_and_reordering_keep_existing_splits(self):
         entries = ["https://www.gutenberg.org/ebooks/123",
-                   {"url": "https://www.gutenberg.org/ebooks/124", "work_id": "shared"}]
+                   "https://www.gutenberg.org/ebooks/124"]
         before = corpus.load_books(entries)
-        entries.append({"url": "https://www.gutenberg.org/ebooks/125", "work_id": "shared"})
+        before_splits = {book.id: corpus.split_for(book.id, "gutenberg-corpus-v1", .05, .05) for book in before}
+        entries.append("https://www.gutenberg.org/ebooks/125")
         after = corpus.load_books(entries)
         self.assertEqual(before, after[:2])
-        self.assertEqual(after[1].work_id, after[2].work_id)
-        self.assertEqual(len(corpus.load_books(entries + [entries[0]])), 3)
+        reordered = corpus.load_books(list(reversed(entries)))
+        for book in reordered:
+            if book.id in before_splits:
+                self.assertEqual(corpus.split_for(book.id, "gutenberg-corpus-v1", .05, .05), before_splits[book.id])
+        self.assertEqual(len(corpus.load_books(entries + [entries[0], "https://www.gutenberg.org/files/123/123-0.txt"])), 3)
 
-    def test_conflicting_group_and_invalid_entries_rejected(self):
+    def test_invalid_url_entries_rejected(self):
         url = "https://www.gutenberg.org/ebooks/123"
-        for entries in ([{"url": url, "work_id": "a"}, {"url": url, "work_id": "b"}],
-                        [], [123], [{"url": url, "work_id": 3}], ["http://example.com/123"]):
+        for entries in ([], [123], [None], [""], ["  "], [{"url": url}], ["http://example.com/123"]):
             with self.subTest(entries=entries), self.assertRaises(corpus.CorpusError):
                 corpus.load_books(entries)
 
@@ -361,6 +364,7 @@ class PipelineTests(unittest.TestCase):
                              ["accepted", "duplicate", "needs_review", "failed"])
             self.assertEqual(len(documents), 1)
             self.assertEqual(documents[0]["text"], corpus.clean_book(book_bytes(), {})[0])
+            self.assertEqual(documents[0]["split"], corpus.split_for("123", "gutenberg-corpus-v1", .05, .05))
 
 
     def test_substantial_shared_prose_cannot_leak_between_splits(self):

@@ -322,8 +322,6 @@ class CorpusError(Exception):
 class Book:
     id: str
     url: str
-    note: str = ""
-    work_id: str = ""
 
 
 def gutenberg_id(url: str) -> str:
@@ -338,8 +336,9 @@ def gutenberg_id(url: str) -> str:
     raise CorpusError(f"Unrecognized Gutenberg URL: {url!r}")
 
 
-def split_for(work_id: str, seed: str, validation: float, test: float) -> str:
-    value = int(hashlib.sha256(f"{seed}\0{work_id}".encode()).hexdigest()[:16], 16) / 2**64
+def split_for(book_id: str, seed: str, validation: float, test: float) -> str:
+    """Assign each Gutenberg edition independently, stable as the URL list grows."""
+    value = int(hashlib.sha256(f"{seed}\0{book_id}".encode()).hexdigest()[:16], 16) / 2**64
     return "test" if value < test else "validation" if value < test + validation else "train"
 
 
@@ -688,7 +687,7 @@ def remove_linked_footnotes(text, audit):
 
 
 def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow: bool = True) -> tuple[str, dict]:
-    if not isinstance(rules, dict) or set(rules) - {"raw_sha256", "start", "end", "remove", "accept_findings", "work_id", "notes"}:
+    if not isinstance(rules, dict) or set(rules) - {"raw_sha256", "start", "end", "remove", "accept_findings", "notes"}:
         raise CorpusError("Unknown cleaning-rule field; check the rule dictionary.")
     decoded, encoding = decode_book(data)
     body, metadata = gutenberg_body(decoded)
@@ -756,15 +755,10 @@ def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow:
 
 def load_books(entries):
     books = {}
-    for entry in entries:
-        fields = {"url": entry} if isinstance(entry, str) else entry
-        if not isinstance(fields, dict) or set(fields) - {"url", "note", "work_id"}:
-            raise CorpusError("Use a URL or a dictionary with url, note, and work_id.")
-        if "url" not in fields or any(not isinstance(v, str) or not v.strip() for v in fields.values()):
-            raise CorpusError("Corpus fields must be nonempty strings.")
-        book = Book(gutenberg_id(fields["url"]), **fields)
-        if book.id in books and books[book.id].work_id != book.work_id:
-            raise CorpusError(f"Conflicting work_id for {book.id}.")
+    for url in entries:
+        if not isinstance(url, str) or not url.strip():
+            raise CorpusError("Each corpus entry must be a nonempty Gutenberg URL string.")
+        book = Book(gutenberg_id(url), url)
         books.setdefault(book.id, book)
     if not books:
         raise CorpusError("The corpus list is empty.")
@@ -811,9 +805,8 @@ def prepare_books(entries, rules, output, allow_partial=False, offline=False):
             row["status"] = "needs_review" if report["problems"] else "duplicate" if digest in seen else "accepted"
             if row["status"] == "accepted":
                 seen.add(digest)
-                group = rules.get(book.id, {}).get("work_id") or book.work_id or book.id
                 documents.append({"id": book.id, "text": text,
-                                  "split": split_for(group, "gutenberg-corpus-v1", .05, .05)})
+                                  "split": split_for(book.id, "gutenberg-corpus-v1", .05, .05)})
         except (CorpusError, OSError, ValueError) as exc:
             row.update(status="failed", error=str(exc))
         audit.append(row)
@@ -822,7 +815,7 @@ def prepare_books(entries, rules, output, allow_partial=False, offline=False):
     for row in audit:
         if row["id"] in overlaps:
             row.update(status="needs_review", problems=["shared_prose_across_splits"], overlaps_with=overlaps[row["id"]])
-            print(row["id"], "shares substantial prose with", row["overlaps_with"], "— use the same work_id or keep one edition.")
+            print(row["id"], "shares substantial prose with", row["overlaps_with"], "— review the overlap and keep one edition if duplicated.")
     documents = [doc for doc in documents if doc["id"] not in overlaps]
     write_json(output / "audit.json", audit)
     print(dict(Counter(row["status"] for row in audit)))
