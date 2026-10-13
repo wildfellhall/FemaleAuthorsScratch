@@ -1,5 +1,7 @@
-"""FemaleAuthorsScratch — paste each numbered cell into Colab and run in order.
+"""FemaleAuthorsScratch — ALL-IN-ONE Colab script; paste numbered cells in order.
 Select an A100 runtime. The corpus list is defined here; Google Drive is not used.
+Start a fresh run after changing the parser or training recipe. Download outputs
+you need to retain before Colab deletes the local runtime.
 """
 
 # %% Cell 1: Dependencies and settings
@@ -34,17 +36,21 @@ class TrainConfig:
     dropout: float = 0.1
     batch_size: int = 8
     gradient_accumulation: int = 8
-    epochs: int = 3
+    epochs: int = 12  # ceiling; validation can stop training earlier
     max_steps: int = 0  # zero: derive the schedule from epochs and actual data size
     learning_rate: float = 0.0003
     weight_decay: float = 0.1
     warmup_fraction: float = 0.03
+    min_lr_ratio: float = 0.1
     max_grad_norm: float = 1.0
     eval_every: int = 200
+    eval_stride: int = 512
+    early_stopping_patience: int = 3  # full epochs without a meaningful improvement
+    early_stopping_min_delta: float = 0.002
     save_every: int = 100
     log_every: int = 10
     keep_checkpoints: int = 2  # best checkpoint is also retained
-    gradient_checkpointing: bool = True
+    gradient_checkpointing: bool = False  # faster on an A100; enable if memory is tight
     seed: int = 42
     sample_every: int = 100  # optimizer updates, not accumulation microbatches; 0 disables
     sample_max_new_tokens: int = 128
@@ -58,7 +64,7 @@ class TrainConfig:
     ])
 
     def validate(self):
-        integers = ("vocab_size", "min_frequency", "context_length", "n_layer", "n_head", "n_embd", "batch_size", "gradient_accumulation", "epochs", "eval_every", "save_every", "log_every", "keep_checkpoints")
+        integers = ("vocab_size", "min_frequency", "context_length", "n_layer", "n_head", "n_embd", "batch_size", "gradient_accumulation", "epochs", "eval_every", "eval_stride", "save_every", "log_every", "keep_checkpoints")
         if any(type(getattr(self, key)) is not int or getattr(self, key) <= 0 for key in integers):
             raise ValueError("Model dimensions, batch sizes, epochs and intervals must be positive integers.")
         if self.vocab_size < 258 or self.context_length < 8:
@@ -71,6 +77,12 @@ class TrainConfig:
             raise ValueError("dropout and warmup_fraction must be in [0, 1).")
         if not all(math.isfinite(x) for x in (self.learning_rate, self.weight_decay, self.max_grad_norm)) or self.learning_rate <= 0 or self.weight_decay < 0 or self.max_grad_norm <= 0:
             raise ValueError("Invalid optimizer configuration.")
+        if not math.isfinite(self.min_lr_ratio) or not 0 <= self.min_lr_ratio <= 1:
+            raise ValueError("min_lr_ratio must be in [0, 1].")
+        if type(self.early_stopping_patience) is not int or self.early_stopping_patience < 0:
+            raise ValueError("early_stopping_patience must be a nonnegative integer; 0 disables it.")
+        if not math.isfinite(self.early_stopping_min_delta) or self.early_stopping_min_delta < 0:
+            raise ValueError("early_stopping_min_delta must be nonnegative and finite.")
         if type(self.gradient_checkpointing) is not bool:
             raise ValueError("gradient_checkpointing must be boolean.")
         if type(self.sample_every) is not int or self.sample_every < 0 or type(self.sample_seed) is not int or self.sample_seed < 0:
@@ -87,7 +99,7 @@ config = TrainConfig()               # Edit the defaults above, or override them
 OUTPUT_DIR = Path("female-authors")   # Automatically created in Colab's local runtime.
 RESUME = False                       # True resumes the latest local checkpoint.
 ALLOW_PARTIAL_CORPUS = False         # Review flagged books before enabling.
-MAX_SESSION_SECONDS = 7200           # 0 trains until the schedule finishes.
+MAX_SESSION_SECONDS = 0              # Optional time limit; 0 uses epochs/early stopping.
 DEVICE = "cuda"                      # "cpu" is for tiny development tests only.
 config.validate()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -329,11 +341,11 @@ def split_for(work_id: str, seed: str, validation: float, test: float) -> str:
     return "test" if value < test else "validation" if value < test + validation else "train"
 
 
-VERSION = "2.0"
+VERSION = "3.0"
 DEFAULT_MIRROR = "https://gutenberg.pglaf.org"
 START = re.compile(r"(?im)^[ \t]*\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*\*{3}[^\n]*$")
 END = re.compile(r"(?im)^[ \t]*\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*\*{3}[^\n]*$")
-LEGACY_END = re.compile(r"(?im)^[ \t]*End of (?:the )?Project Gutenberg(?:'s)? (?:EBook|Etext)\b[^\n]*$")
+LEGACY_END = re.compile(r"(?im)^[ \t]*End of (?:the )?Project Gutenberg(?:[’']s)?(?: (?:EBook|Etext))?\b[^\n]*$")
 
 
 def sha256(data: bytes) -> str:
@@ -369,10 +381,17 @@ def gutenberg_body(text: str) -> tuple[str, dict]:
     if re.search(r"(?is)<(?:!doctype\s+html|html|body)\b", text[:2048]):
         raise CorpusError("HTML response, not a plain-text book.")
     starts = list(START.finditer(text))
-    ends = list(END.finditer(text)) or list(LEGACY_END.finditer(text))
+    modern_ends = list(END.finditer(text))
+    ends = modern_ends or list(LEGACY_END.finditer(text))
     if len(starts) != 1 or len(ends) != 1 or ends[0].start() <= starts[0].end():
         raise CorpusError("Missing, ambiguous, or reversed Gutenberg start/end markers; refusing to guess.")
     start, end = starts[0], ends[0]
+    # Older editions sometimes contain both footer styles. Strip the inner one too.
+    legacy = [m for m in LEGACY_END.finditer(text) if start.end() < m.start() < end.start()]
+    if legacy:
+        if len(legacy) != 1 or legacy[0].start() < start.end() + .8 * (end.start() - start.end()):
+            raise CorpusError("Ambiguous embedded Gutenberg end marker; review this edition.")
+        end = legacy[0]
     header = text[:start.start()]
     metadata = {}
     for key in ("Title", "Author", "Language", "Release date", "Release Date"):
@@ -473,18 +492,25 @@ def retry_delay(value: str, attempt: int) -> float:
 
 
 CHAPTER = re.compile(
-    r"(?im)^[ \t]*(?:CHAPTER|CHAP\.)[ \t]+(?:[IVXLCDM]+|\d+|ONE|TWO|THREE|FIRST|SECOND|THIRD)"
-    r"\b[^\n]{0,140}$"
+    r"(?im)^[ \t]*_?(?:CHAPTER|CHAP\.|LETTER|PART|BOOK)[ \t]+"
+    r"(?:[IVXLCDM]+|\d+|ONE|TWO|THREE|FOUR|FIVE|FIRST|SECOND|THIRD)(?=[\W_]|$)[^\n]{0,140}$"
 )
 PROLOGUE = re.compile(r"(?im)^[ \t]*(?:PROLOGUE|PRELUDE|INTRODUCTORY CHAPTER)[. \t]*$")
+BACK_MATTER = re.compile(
+    r"(?im)^[ \t]*(?:(?:A )?NOTE ON THE TEXT|TRANSCRIBER[’']?S? NOTES?|"
+    r"TYPOGRAPHICAL ERRORS[^\n]*|FOOTNOTES|ENDNOTES|"
+    r"PRINTED BY[^\n]*|(?-i:[A-Z .&'-]+PRESS:)[^\n]*|[^\n]{0,40}: PRESS OF[^\n]*)[.: \t]*$"
+)
+STORY_END = re.compile(r"(?im)^[ \t]*(?:THE END|FINIS|END OF VOL(?:UME)?\.?\s+[IVX\d]+)[.! \t]*$")
+
 SUSPECT = {
     "gutenberg_boilerplate": r"(?i)project\s+gutenberg|gutenberg\.org|www\.pgdp\.net|distributed\s+proofread",
-    "transcriber_material": r"(?i)transcrib(?:er|ers|er's|ers’|er’s).{0,15}(?:note|comment)|digitiz(?:ed|ation)|scann?ed\s+(?:by|from)",
+    "transcriber_material": r"(?im)\btranscrib(?:er|ers|er's|ers’|er’s).{0,15}(?:note|comment)|^[ \t]*(?:digitiz(?:ed|ation)\b|scann?ed\s+(?:by|from)\b)",
     "contents_or_illustration_list": r"(?im)^\s*(?:(?:table of )?contents|list of illustrations|illustrations)[. \t]*$",
     "publisher_material": r"(?im)^\s*(?:all rights reserved|printed (?:by|in)|published by|copyright(?:ed)?\b|advertisements\b)",
-    "possible_back_matter": r"(?im)^\s*(?:by the same author|other books by|books by|publisher['’]s (?:note|catalogue|catalog|announcement)|appendix|editor['’]s notes?)[.: \t]*$",
+    "possible_back_matter": r"(?im)^\s*(?:by the same author|other books by|books by|publisher['’]s (?:note|catalogue|catalog|announcement)|appendix|editor['’]s notes?|(?:a )?note on the text|for sale by all booksellers|.*cloth,?\s+12mo).*",
     "remaining_illustration": r"(?i)\[illustration\b|\[page\s+\d+\]|\[pg\.?\s*\d+\]",
-    "possible_footnote": r"(?im)\[(?:\d{1,4}|[A-Z]|[*†‡])\]|^\s*(?:footnotes?|endnotes?)\b",
+    "possible_footnote": r"(?m)\[(?:\d{1,4}|[A-Z]|[*†‡])\]|(?i:^\s*(?:footnotes?|endnotes?)\b)",
     "markup": r"(?i)</?(?:html|body|div|span|p|a|img)\b[^>]*>|&(?:amp|lt|gt|nbsp);",
     "replacement_character": "\ufffd",
     "possible_encoding_damage": r"Ã[\u0080-\u00bf]|Â[\u0080-\u00bf]|â[€\u0080-\u009f]",
@@ -535,31 +561,54 @@ def trim_to_narrative(text: str, rules: dict, audit: list) -> tuple[str, list[st
     if "start" in rules:
         start = anchor_position(text, rules["start"])
     else:
-        # TOC entries are followed by more short entries, not sustained prose.
-        headings = list(CHAPTER.finditer(text))
+        headings = [*CHAPTER.finditer(text), *PROLOGUE.finditer(text)]
+        bare = list(re.finditer(r"(?m)^[ \t]*(?:[IVXLCDM]{1,8})[.)]?[ \t]*$", text))
+        if {"I", "II"}.issubset({m.group().strip().rstrip(".)") for m in bare}):
+            headings.extend(bare)
+        headings.sort(key=lambda m: m.start())
         candidates = []
         for index, heading in enumerate(headings):
             next_pos = headings[index + 1].start() if index + 1 < len(headings) else len(text)
-            after = text[heading.end():min(next_pos, heading.end() + 5000)]
-            paragraphs = re.split(r"\n[ \t]*\n", after.strip())[:5]
-            if any(len(p.split()) >= 45 and re.search(r"[.!?][\"’”']?(?:\s|$)", p) for p in paragraphs):
+            after = text[heading.end():min(next_pos, heading.end() + 8000)]
+            paragraphs = re.split(r"\n[ \t]*\n", after.strip())[:20]
+            # Contents entries sit on adjacent lines; actual headings have a blank line.
+            separated = bool(re.match(r"[ \t]*\n[ \t]*\n", text[heading.end():]) or
+                             re.search(r"\n[ \t]*\n[ \t]*$", text[max(0, heading.start()-30):heading.start()]))
+            prose_words = sum(len(p.split()) for p in paragraphs
+                              if re.search(r"[.!?][\"’”']?(?:\s|$)", p) and len(p.split()) >= 4)
+            # A final TOC entry can be followed by a long introduction before Chapter I.
+            number = re.search(r"(?i)\b(?:CHAPTER|CHAP\.|LETTER|PART|BOOK)\s+([\w]+)", heading.group())
+            label = number[1].upper() if number else heading.group().strip().rstrip(".)")
+            restarts = label not in {"I", "1", "ONE", "FIRST", "PROLOGUE", "PRELUDE", "INTRODUCTORY CHAPTER"} and any(
+                re.match(r"(?i)\s*(?:(?:CHAPTER|CHAP\.|LETTER|PART|BOOK)\s+)?(?:I|1|ONE|FIRST)\b", h.group())
+                for h in headings[index + 1:index + 3])
+            if separated and prose_words >= 30 and not restarts:
                 candidates.append(heading)
         if candidates:
             start = candidates[0].start()
-            method = "chapter_heuristic"
-            prologues = list(PROLOGUE.finditer(text[:start]))
-            if prologues:
-                start = prologues[-1].start()
+            method = "narrative_heading"
             if start > len(text) * 0.25:
                 problems.append("large_front_matter_cut")
-            prefix = text[:start]
-            if re.search(r"(?im)^\s*(?:LETTER\s+(?:I|1)|PREFATORY TALE)\b", prefix):
-                problems.append("possible_narrative_before_first_chapter")
+            # Do not silently drop an opening with too little prose for the heuristic.
+            earlier = [h for h in headings if h.start() < start
+                       and re.match(r"[ \t]*\n[ \t]*\n", text[h.end():])]
+            if earlier:
+                previous = earlier[-1]
+                between = text[previous.end():start]
+                if re.search(r'["“][^\n]+[.!?]', between) and not re.search(r"(?im)^\s*CONTENTS\b", between):
+                    problems.append("possible_narrative_before_first_chapter")
         else:
             start = 0
             method = "unresolved"
             problems.append("narrative_start_not_identified")
     end = anchor_position(text, rules["end"]) if "end" in rules else len(text)
+    if "end" not in rules:
+        endings = [m for m in STORY_END.finditer(text) if m.start() > max(start, len(text) * .65)]
+        if endings and not re.search(r"(?im)^\s*(?:EPILOGUE|CHAPTER|CHAP\.|LETTER|PART|BOOK)\b", text[endings[-1].end():]):
+            end = endings[-1].end()
+        editorial = [m for m in BACK_MATTER.finditer(text) if m.start() > max(start, len(text) * .65)]
+        if editorial:
+            end = min(end, editorial[0].start())
     if end <= start:
         raise CorpusError("The narrative end anchor precedes its start anchor.")
     record_removal(audit, "front_matter", text[:start])
@@ -596,7 +645,49 @@ def tidy_layout(text: str, audit: list, reflow: bool) -> str:
     return "\n\n".join(p for p in paragraphs if p).strip() + "\n"
 
 
+def strip_annotations(text, audit, footnotes=False):
+    pattern = r"(?i)\[(?:Footnote\b" if footnotes else r"(?i)\[(?:Illustrations?\b|Transcriber[’']?s?\s+Notes?\b"
+    pattern += ")"
+    pieces, cursor = [], 0
+    for match in re.finditer(pattern, text):
+        if match.start() < cursor:
+            continue
+        depth, end = 0, None
+        for position in range(match.start(), min(len(text), match.start() + 30000)):
+            depth += (text[position] == "[") - (text[position] == "]")
+            if depth == 0:
+                end = position + 1
+                break
+        if end is None:
+            raise CorpusError("Unclosed or oversized editorial annotation; add an explicit rule.")
+        removed = text[match.start():end]
+        # A chapter title may itself be typeset as an illustration. Retain that label.
+        inner = re.sub(r"(?i)^\[Illustrations?\s*:?", "", removed).rstrip("]").strip()
+        labels = [] if footnotes else [h.group().strip() for h in CHAPTER.finditer(inner)]
+        replacement = "\n\n" + "\n\n".join(labels) + "\n\n" if labels else ""
+        pieces.extend((text[cursor:match.start()], replacement))
+        record_removal(audit, "labelled_footnote" if footnotes else "editorial_annotation", removed)
+        cursor = end
+    return "".join(pieces) + text[cursor:]
+
+
+def remove_linked_footnotes(text, audit):
+    # Remove a single-paragraph numbered note only when its inline reference exists.
+    definitions = list(re.finditer(r"(?m)^[ \t]*\[(\d{1,4})\][ \t]+[^\n]+(?:\n(?![ \t]*\n)[^\n]+)*", text))
+    for match in reversed(definitions):
+        marker = f"[{match[1]}]"
+        following = text[match.end():].lstrip()
+        bounded = not following or CHAPTER.match(following) or re.match(r"\[\d{1,4}\]\s", following)
+        if bounded and text[:match.start()].count(marker) == 1:
+            record_removal(audit, "linked_footnote", match.group())
+            text = text[:match.start()] + text[match.end():]
+            text = text.replace(marker, "", 1)
+    return text
+
+
 def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow: bool = True) -> tuple[str, dict]:
+    if not isinstance(rules, dict) or set(rules) - {"raw_sha256", "start", "end", "remove", "accept_findings", "work_id", "notes"}:
+        raise CorpusError("Unknown cleaning-rule field; check the rule dictionary.")
     decoded, encoding = decode_book(data)
     body, metadata = gutenberg_body(decoded)
     audit, problems = [], []
@@ -604,8 +695,12 @@ def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow:
         raise CorpusError("Cleaning rules require the matching raw_sha256; the edition may have changed.")
     original_chars = len(body)
     # Explicit digital artifacts can occur within either boundary.
-    body = substitute(body, r"(?is)\[(?:Illustration\b|Illustrations\b)[^\[\]]{0,12000}\]", "illustration_caption", audit)
-    body = substitute(body, r"(?is)\[Transcriber[’']?s?\s+Notes?\b[^\[\]]{0,12000}\]", "bracketed_transcriber_note", audit)
+    note_ids = set(re.findall(r"(?i)\[Footnote\s+(\d{1,4}|[A-Z]|[*†‡])\s*:", body))
+    note_sections = [m for m in re.finditer(r"(?im)^\s*(?:FOOTNOTES|ENDNOTES)[.: \t]*$", body)
+                     if m.start() > len(body) * .65]
+    if note_sections:
+        note_ids.update(re.findall(r"(?m)^[ \t]*\[(\d{1,4}|[A-Z]|[*†‡])\]", body[note_sections[-1].end():]))
+    body = strip_annotations(body, audit)
     # A terminal transcriber's section is safely bounded only near the end.
     notes = list(re.finditer(r"(?im)^[ \t]*(?:[*_ ]*)TRANSCRIBER[’']?S?[ \t]+NOTES?[.: \t*_]*$", body))
     if notes and notes[-1].start() > len(body) * 0.8:
@@ -627,9 +722,12 @@ def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow:
         record_removal(audit, "explicit_removal", literal * expected)
         body = body.replace(literal, "")
     if not keep_book_matter:
-        # Remove only explicitly labelled footnotes, including their own reference.
-        # Bare [1]/[A] references are ambiguous and sent for review, never guessed.
-        body = substitute(body, r"(?is)\[Footnote\b[^\[\]]{0,12000}\]", "labelled_footnote", audit)
+        # Remove labelled or clearly paired notes; flag ambiguous references for review.
+        body = strip_annotations(body, audit, footnotes=True)
+        body = remove_linked_footnotes(body, audit)
+        if note_ids:
+            reference_pattern = r"\[(?:" + "|".join(re.escape(note) for note in sorted(note_ids)) + r")\]"
+            body = substitute(body, reference_pattern, "defined_footnote_reference", audit)
     clean = tidy_layout(body, audit, reflow)
     findings = {}
     for name, pattern in SUSPECT.items():
@@ -671,6 +769,32 @@ def load_books(entries):
     return list(books.values())
 
 
+def overlapping_editions(documents):
+    """Flag substantial shared prose across splits without deleting narrative passages."""
+    index, totals, overlaps = {}, {}, {}
+    for doc in documents:
+        paragraphs = {}
+        for paragraph in doc["text"].split("\n\n"):
+            words = re.findall(r"\w+", unicodedata.normalize("NFKC", paragraph).casefold())
+            if len(words) >= 40:
+                paragraphs[sha256(" ".join(words).encode())] = len(words)
+        totals[doc["id"]] = sum(paragraphs.values())
+        shared = {}
+        for digest, words in paragraphs.items():
+            for previous, split in index.get(digest, []):
+                if split != doc["split"]:
+                    count, length = shared.get(previous, (0, 0))
+                    shared[previous] = count + 1, length + words
+        hits = [previous for previous, (count, length) in shared.items()
+                if count >= 3 and length >= .2 * min(totals[previous], totals[doc["id"]])]
+        if hits:
+            overlaps[doc["id"]] = hits
+        else:
+            for digest in paragraphs:
+                index.setdefault(digest, []).append((doc["id"], doc["split"]))
+    return overlaps
+
+
 def prepare_books(entries, rules, output, allow_partial=False, offline=False):
     downloader = Downloader(output, DEFAULT_MIRROR, 2, 30, 2, offline, cache_raw=False)
     documents, audit, seen = [], [], set()
@@ -678,9 +802,10 @@ def prepare_books(entries, rules, output, allow_partial=False, offline=False):
         row = {"id": book.id, "url": book.url}
         try:
             raw, metadata = downloader.fetch(book)
+            row["raw_sha256"] = metadata["sha256"]
             text, report = clean_book(raw, rules.get(book.id, {}))
-            digest = sha256(text.encode())
-            row.update(report, raw_sha256=metadata["sha256"])
+            digest = sha256(" ".join(re.findall(r"\w+", unicodedata.normalize("NFKC", text).casefold())).encode())
+            row.update(report, raw_sha256=metadata["sha256"], opening=text[:500], ending=text[-500:])
             row["status"] = "needs_review" if report["problems"] else "duplicate" if digest in seen else "accepted"
             if row["status"] == "accepted":
                 seen.add(digest)
@@ -691,6 +816,12 @@ def prepare_books(entries, rules, output, allow_partial=False, offline=False):
             row.update(status="failed", error=str(exc))
         audit.append(row)
         print(book.id, row["status"], row.get("problems", row.get("error", "")))
+    overlaps = overlapping_editions(documents)
+    for row in audit:
+        if row["id"] in overlaps:
+            row.update(status="needs_review", problems=["shared_prose_across_splits"], overlaps_with=overlaps[row["id"]])
+            print(row["id"], "shares substantial prose with", row["overlaps_with"], "— use the same work_id or keep one edition.")
+    documents = [doc for doc in documents if doc["id"] not in overlaps]
     write_json(output / "audit.json", audit)
     print(dict(Counter(row["status"] for row in audit)))
     if not allow_partial and any(row["status"] in {"needs_review", "failed"} for row in audit):
@@ -725,15 +856,28 @@ else:
 
 
 class TokenWindows:
-    """One-token overlap keeps every prediction target, including each book's EOS."""
+    """Book-local windows; epoch offsets vary context without losing prediction targets."""
     def __init__(self, texts, tokenizer, context_length):
         if context_length < 2:
             raise ValueError("context_length must be at least 2")
         self.context_length = context_length
+        self.text_bytes = sum(len(text.encode("utf-8")) for text in texts)
         self.books = [np.asarray([tokenizer.bos_token_id,
                       *tokenizer.encode(text, add_special_tokens=False), tokenizer.eos_token_id],
                       dtype=np.int32) for text in texts]
-        self.ends = np.cumsum([math.ceil((len(book) - 1) / (context_length - 1)) for book in self.books]).tolist()
+        self.first_targets = [context_length - 1] * len(self.books)
+        self._layout()
+
+    def _layout(self):
+        counts = [1 + math.ceil(max(0, len(book) - 1 - first) / (self.context_length - 1))
+                  for book, first in zip(self.books, self.first_targets)]
+        self.ends = np.cumsum(counts).tolist()
+
+    def set_epoch(self, seed, epoch):
+        # Independent RNG: the same epoch has identical windows when resuming.
+        rng = np.random.default_rng(np.random.SeedSequence([seed, epoch]))
+        self.first_targets = rng.integers(1, self.context_length, size=len(self.books)).tolist()
+        self._layout()
 
     def __len__(self):
         return self.ends[-1] if self.ends else 0
@@ -743,11 +887,13 @@ class TokenWindows:
             raise IndexError(index)
         book_index = bisect_right(self.ends, index)
         local = index - (self.ends[book_index - 1] if book_index else 0)
-        start = local * (self.context_length - 1)
-        return self.books[book_index][start:start + self.context_length].tolist()
+        first = self.first_targets[book_index]
+        start = 0 if local == 0 else first + (local - 1) * (self.context_length - 1)
+        end = first + 1 if local == 0 else start + self.context_length
+        return self.books[book_index][start:end].tolist()
 
 
-def collate_windows(windows, pad_token_id):
+def collate_windows(windows, pad_token_id, target_starts=None):
     ids = torch.full((len(windows), max(map(len, windows))), pad_token_id, dtype=torch.long)
     mask = torch.zeros_like(ids)
     for row, tokens in enumerate(windows):
@@ -755,6 +901,9 @@ def collate_windows(windows, pad_token_id):
         mask[row, :len(tokens)] = 1
     labels = ids.clone()
     labels[mask == 0] = -100
+    if target_starts is not None:
+        for row, start in enumerate(target_starts):
+            labels[row, :start] = -100
     return {"input_ids": ids, "attention_mask": mask, "labels": labels}
 
 
@@ -784,26 +933,50 @@ def amp_context(device):
     return torch.autocast("cuda", dtype=torch.bfloat16) if device.type == "cuda" else nullcontext()
 
 
+def evaluation_windows(dataset, stride):
+    """Give held-out continuations context; count every target exactly once."""
+    stride = min(stride, dataset.context_length - 1)
+    for book in dataset.books:
+        previous_end = 1  # BOS is context, never a prediction target.
+        for start in range(0, len(book) - 1, stride):
+            end = min(start + dataset.context_length, len(book))
+            yield book[start:end].tolist(), max(1, previous_end - start)
+            previous_end = end
+            if end == len(book):
+                break
+
+
 def evaluate(model, dataset, config, tokenizer, device):
-    import torch
     if not len(dataset):
         return None
     model.eval()
     total_nll, targets = 0.0, 0
+    windows, starts = [], []
+    def score():
+        batch = collate_windows(windows, tokenizer.pad_token_id, starts)
+        count = int((batch["labels"][:, 1:] != -100).sum())
+        batch = {key: value.to(device) for key, value in batch.items()}
+        with amp_context(device):
+            loss = float(model(**batch).loss)
+        if not math.isfinite(loss):
+            raise RuntimeError("Non-finite evaluation loss.")
+        return loss * count, count
     with torch.inference_mode():
-        for start in range(0, len(dataset), config.batch_size):
-            batch = collate_windows([dataset[i] for i in range(start, min(start + config.batch_size, len(dataset)))], tokenizer.pad_token_id)
-            count = int((batch["labels"][:, 1:] != -100).sum())
-            batch = {key: value.to(device) for key, value in batch.items()}
-            with amp_context(device):
-                output = model(**batch)
-            loss = float(output.loss)
-            if not math.isfinite(loss):
-                raise RuntimeError("Non-finite evaluation loss.")
-            total_nll += loss * count
+        for tokens, target_start in evaluation_windows(dataset, config.eval_stride):
+            windows.append(tokens)
+            starts.append(target_start)
+            if len(windows) == config.batch_size:
+                nll, count = score()
+                total_nll += nll
+                targets += count
+                windows, starts = [], []
+        if windows:
+            nll, count = score()
+            total_nll += nll
             targets += count
     loss = total_nll / targets
-    return {"loss": loss, "perplexity": math.exp(loss) if loss < 700 else None, "target_tokens": targets}
+    return {"loss": loss, "perplexity": math.exp(loss) if loss < 700 else None,
+            "target_tokens": targets, "bits_per_byte": total_nll / (math.log(2) * dataset.text_bytes) if dataset.text_bytes else None}
 
 
 def generate_samples(model, tokenizer, config: TrainConfig, device, step: int, output: Path):
@@ -923,7 +1096,7 @@ def log_metrics(output, values):
 
 # %% Cell 6: Train with the custom PyTorch loop
 
-def train(datasets, tokenizer, config, output, resume=False, max_seconds=7200, device_name="cuda"):
+def train(datasets, tokenizer, config, output, resume=False, max_seconds=0, device_name="cuda"):
     config.validate()
     if not math.isfinite(max_seconds) or max_seconds < 0:
         raise ValueError("max_seconds must be nonnegative and finite")
@@ -954,7 +1127,7 @@ def train(datasets, tokenizer, config, output, resume=False, max_seconds=7200, d
         for book in dataset.books:
             data_hash.update(len(book).to_bytes(8, "little"))
             data_hash.update(book.astype("<i4").tobytes())
-    recipe = {"config": settings, "data": data_hash.hexdigest(),
+    recipe = {"pipeline": "v3-epoch-offsets-sliding-eval", "config": settings, "data": data_hash.hexdigest(),
               "tokenizer": sha256(tokenizer.backend_tokenizer.to_str().encode()),
               "precision": "bf16" if device.type == "cuda" else "fp32",
               "versions": {name: importlib.metadata.version(name) for name in ("torch", "transformers", "tokenizers", "numpy")}}
@@ -969,9 +1142,13 @@ def train(datasets, tokenizer, config, output, resume=False, max_seconds=7200, d
             raise CorpusError("Output already contains a run. Set RESUME=True or choose a new OUTPUT_DIR.")
         write_json(output / "run.json", recipe)
     tokenizer.save_pretrained(output / "tokenizer")
-    batches_per_epoch = math.ceil(len(datasets["train"]) / config.batch_size)
-    steps_per_epoch = math.ceil(batches_per_epoch / config.gradient_accumulation)
-    total_steps = steps_per_epoch * config.epochs
+    steps_per_epoch = []
+    for epoch in range(config.epochs):
+        datasets["train"].set_epoch(config.seed, epoch)
+        batches = math.ceil(len(datasets["train"]) / config.batch_size)
+        steps_per_epoch.append(math.ceil(batches / config.gradient_accumulation))
+    datasets["train"].set_epoch(config.seed, 0)
+    total_steps = sum(steps_per_epoch)
     if config.max_steps:
         total_steps = min(total_steps, config.max_steps)
     warmup_steps = min(max(1, round(total_steps * config.warmup_fraction)), total_steps - 1) if config.warmup_fraction else 0
@@ -988,10 +1165,10 @@ def train(datasets, tokenizer, config, output, resume=False, max_seconds=7200, d
         if warmup_steps and step < warmup_steps:
             return (step + 1) / warmup_steps
         progress = min(1.0, (step - warmup_steps) / max(1, total_steps - warmup_steps))
-        return 0.5 * (1 + math.cos(math.pi * progress))
+        return config.min_lr_ratio + (1 - config.min_lr_ratio) * 0.5 * (1 + math.cos(math.pi * progress))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_scale)
-    state = {"epoch": 0, "next_batch": 0, "step": 0, "tokens_seen": 0, "best_loss": None, "best_step": None}
+    state = {"epoch": 0, "next_batch": 0, "step": 0, "tokens_seen": 0, "best_loss": None, "best_step": None, "best_epoch_loss": None, "bad_epochs": 0}
     checkpoints = checkpoint_paths(output)
     if resume and checkpoints:
         state = restore_checkpoint(checkpoints[-1], model, optimizer, scheduler, identity, device)
@@ -1007,9 +1184,12 @@ def train(datasets, tokenizer, config, output, resume=False, max_seconds=7200, d
     print(json.dumps(summary, indent=2), flush=True)
 
     started, session_tokens = time.monotonic(), 0
-    stop_reason = "complete"
-    while state["step"] < total_steps and state["epoch"] < config.epochs:
+    early_stopped = bool(config.early_stopping_patience and state["bad_epochs"] >= config.early_stopping_patience)
+    stop_reason = "early_stopping" if early_stopped else "complete"
+    while not early_stopped and state["step"] < total_steps and state["epoch"] < config.epochs:
         epoch = state["epoch"]
+        datasets["train"].set_epoch(config.seed, epoch)
+        batches_per_epoch = math.ceil(len(datasets["train"]) / config.batch_size)
         order = np.random.default_rng(config.seed + epoch).permutation(len(datasets["train"]))
         for batch_number in range(state["next_batch"], batches_per_epoch, config.gradient_accumulation):
             batch_end = min(batch_number + config.gradient_accumulation, batches_per_epoch)
@@ -1055,15 +1235,21 @@ def train(datasets, tokenizer, config, output, resume=False, max_seconds=7200, d
                 log_metrics(output, {"step": state["step"], "validation": metrics})
                 if state["best_loss"] is None or metrics["loss"] < state["best_loss"]:
                     state["best_loss"], state["best_step"] = metrics["loss"], state["step"]
+                if batch_end == batches_per_epoch:
+                    if state["best_epoch_loss"] is None or metrics["loss"] < state["best_epoch_loss"] - config.early_stopping_min_delta:
+                        state["best_epoch_loss"], state["bad_epochs"] = metrics["loss"], 0
+                    else:
+                        state["bad_epochs"] += 1
+                    early_stopped = bool(config.early_stopping_patience and state["bad_epochs"] >= config.early_stopping_patience)
             if should_eval or state["step"] % config.save_every == 0 or finished or timed_out:
                 save_checkpoint(output, model, optimizer, scheduler, state, identity, config)
-            if finished or timed_out:
-                stop_reason = "complete" if finished else "session_time_limit"
+            if finished or timed_out or early_stopped:
+                stop_reason = "early_stopping" if early_stopped else "complete" if finished else "session_time_limit"
                 break
-        if stop_reason == "session_time_limit":
+        if stop_reason in {"session_time_limit", "early_stopping"}:
             break
 
-    # Export the validation-selected model; test is touched only at schedule completion.
+    # Export the validation-selected model; test only at completion or early stopping.
     from safetensors.torch import load_model
     best = output / f"checkpoint-{state['best_step']}"
     load_model(model, str(best / "model.safetensors"), device=str(device))
@@ -1073,7 +1259,7 @@ def train(datasets, tokenizer, config, output, resume=False, max_seconds=7200, d
     model.save_pretrained(output / "best_model", safe_serialization=True)
     tokenizer.model_max_length = config.context_length
     tokenizer.save_pretrained(output / "best_model")
-    complete = state["step"] >= total_steps or state["epoch"] >= config.epochs
+    complete = early_stopped or state["step"] >= total_steps or state["epoch"] >= config.epochs
     result = {"complete": complete, "stop_reason": stop_reason, "step": state["step"], "best_step": state["best_step"], "best_validation_loss": state["best_loss"], "tokens_seen": state["tokens_seen"], "session_seconds": time.monotonic() - started, "model": str(output / "best_model")}
     if complete:
         model.config.use_cache = False

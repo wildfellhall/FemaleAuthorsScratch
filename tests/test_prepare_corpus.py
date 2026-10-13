@@ -97,9 +97,35 @@ class CleaningTests(unittest.TestCase):
         self.assertTrue(text.startswith('PROLOGUE'))
 
     def test_letters_before_chapter_not_silently_lost(self):
-        data = book_bytes('LETTER I\n\n' + PARAGRAPH + '\n\n' + NARRATIVE)
-        _, report = corpus.clean_book(data, {})
-        self.assertIn('possible_narrative_before_first_chapter', report['problems'])
+        text, report = corpus.clean_book(book_bytes('LETTER I\n\n' + PARAGRAPH + '\n\n' + NARRATIVE), {})
+        self.assertTrue(text.startswith('LETTER I'))
+        self.assertNotIn('possible_narrative_before_first_chapter', report['problems'])
+
+    def test_part_and_book_headings_with_contents(self):
+        for label in ('PART', 'BOOK'):
+            body = f'TITLE\n\nContents\n\n{label} I\n{label} II\n\n'
+            body += NARRATIVE.replace('CHAPTER', label)
+            text, report = corpus.clean_book(book_bytes(body), {})
+            self.assertTrue(text.startswith(label + ' I.'))
+            self.assertNotIn('Contents', text)
+            self.assertFalse(report['problems'])
+
+    def test_scanning_in_narrative_is_not_a_digitization_credit(self):
+        body = NARRATIVE + '\n\nHer life lay unscanned by vulgar eyes. Both ladies were quietly scanned by the doctor.'
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertIn('unscanned by vulgar eyes', text)
+        self.assertNotIn('transcriber_material', report['problems'])
+        _, report = corpus.clean_book(book_bytes(body + '\n\nScanned by a volunteer.'), {})
+        self.assertIn('transcriber_material', report['problems'])
+
+    def test_labelled_alphabetic_and_symbol_notes_remove_their_references(self):
+        for marker in ('A', '*', '†'):
+            body = NARRATIVE.replace('Mira opened', f'Mira[{marker}] opened', 1)
+            body += f'\n\n[Footnote {marker}: An explanatory note.]'
+            text, report = corpus.clean_book(book_bytes(body), {})
+            self.assertNotIn('explanatory note', text)
+            self.assertNotIn(f'[{marker}]', text)
+            self.assertFalse(report['problems'])
 
     def test_unstructured_story_requires_boundary(self):
         data = book_bytes(PARAGRAPH * 3)
@@ -204,6 +230,99 @@ class CleaningTests(unittest.TestCase):
         self.assertIn('legacy_encoding_needs_review', report['problems'])
 
 
+    def test_short_dialogue_opening_is_not_skipped(self):
+        dialogue = '\n\n'.join(['“Will you come home?” she asked him.',
+                    '“I will be there before the evening,” he said.',
+                    '“Then I shall wait for you beside the old gate.”'] * 3)
+        body = 'CHAPTER I.\n\nA BEGINNING\n\n' + dialogue + '\n\nCHAPTER II.\n\n' + PARAGRAPH * 3
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertTrue(text.startswith('CHAPTER I.'))
+        self.assertIn(dialogue, text)
+        self.assertFalse(report['problems'])
+
+    def test_last_contents_entry_does_not_capture_the_preface(self):
+        body = ('CONTENTS\n\n CHAPTER 1\n CHAPTER 2\n\nPREFACE\n\n' + PARAGRAPH * 2
+                + '\n\nCHAPTER 1\n\n' + PARAGRAPH * 5 + '\n\nCHAPTER 2\n\n' + PARAGRAPH * 3)
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertTrue(text.startswith('CHAPTER 1'))
+        self.assertNotIn('PREFACE', text)
+        self.assertNotIn('CONTENTS', text)
+
+    def test_nested_illustration_preserves_its_chapter_title(self):
+        body = '[Illustration:\nChapter I.]\n\n' + PARAGRAPH * 3
+        body += '\n\n[Illustration: A garden [Copyright 1894 by a publisher.]]\n\n'
+        body += 'CHAPTER II.\n\n' + PARAGRAPH * 3
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertTrue(text.startswith('Chapter I.'))
+        self.assertNotIn('Illustration', text)
+        self.assertNotIn('Copyright', text)
+        self.assertFalse(report['problems'])
+
+    def test_unclosed_annotation_is_rejected(self):
+        with self.assertRaisesRegex(corpus.CorpusError, 'Unclosed'):
+            corpus.clean_book(book_bytes(NARRATIVE + '\n[Illustration: unfinished'), {})
+
+    def test_both_footer_styles_are_removed(self):
+        body = NARRATIVE + "\n\nEnd of Project Gutenberg's An Invented Book, by An Author\n"
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertNotIn('Gutenberg', text)
+        self.assertFalse(report['problems'])
+
+    def test_printers_notes_and_editorial_end_matter_are_removed(self):
+        for tail in ('THE END\n\nPrinted by A PRINTER.\nFootnotes:\n[1] A note.',
+                     'A NOTE ON THE TEXT\n\nAn editorial discussion.',
+                     'CHISWICK PRESS:--A PRINTER.\nLONDON.'):
+            with self.subTest(tail=tail):
+                text, report = corpus.clean_book(book_bytes(NARRATIVE * 3 + '\n\n' + tail), {})
+                self.assertNotIn('PRINTER', text)
+                self.assertNotIn('editorial discussion', text)
+                self.assertNotIn('Footnotes', text)
+
+    def test_epilogue_after_an_end_marker_is_preserved(self):
+        body = NARRATIVE * 3 + '\n\nTHE END\n\nEPILOGUE\n\n' + PARAGRAPH
+        text, _ = corpus.clean_book(book_bytes(body), {})
+        self.assertIn('EPILOGUE', text)
+        self.assertTrue(text.endswith(PARAGRAPH.strip() + '\n'))
+
+    def test_paired_single_paragraph_footnote_is_removed(self):
+        body = NARRATIVE.replace('Mira opened', 'Mira[1] opened', 1)
+        body += '\n\n[1] An explanatory note.\n\nCHAPTER III.\n\n' + PARAGRAPH
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertNotIn('[1]', text)
+        self.assertNotIn('explanatory', text)
+        self.assertFalse(report['problems'])
+
+    def test_mult_paragraph_footnote_remains_flagged(self):
+        body = NARRATIVE.replace('Mira opened', 'Mira[1] opened', 1)
+        body += '\n\n[1] First editorial paragraph.\n\nUnbounded second editorial paragraph.'
+        _, report = corpus.clean_book(book_bytes(body), {})
+        self.assertIn('possible_footnote', report['problems'])
+
+    def test_bare_roman_chapters_are_recognized(self):
+        text, report = corpus.clean_book(book_bytes('TITLE\n\nI\n\n' + PARAGRAPH * 3 + '\n\nII\n\n' + PARAGRAPH * 3), {})
+        self.assertTrue(text.startswith('I\n'))
+        self.assertFalse(report['problems'])
+
+    def test_emphasized_chapter_heading_is_recognized(self):
+        body = '_CHAPTER I._\n\n' + PARAGRAPH * 3 + '\n\n_CHAPTER II._\n\n' + PARAGRAPH
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertTrue(text.startswith('CHAPTER I.'))
+        self.assertFalse(report['problems'])
+
+    def test_defined_footnotes_remove_only_matched_references(self):
+        body = NARRATIVE.replace('Mira opened', 'Mira[1] opened', 1)
+        body += '\n\n[Footnote 1: An explanatory note.]'
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertNotIn('[1]', text)
+        self.assertNotIn('explanatory', text)
+        self.assertFalse(report['problems'])
+
+    def test_unknown_rule_field_cannot_be_silently_ignored(self):
+        raw = book_bytes()
+        with self.assertRaisesRegex(corpus.CorpusError, 'Unknown cleaning-rule'):
+            corpus.clean_book(raw, rules_for(raw, strat={'text': 'CHAPTER I.'}))
+
+
 class PipelineTests(unittest.TestCase):
     def test_growth_and_grouping_are_independent_of_list_length(self):
         entries = ["https://www.gutenberg.org/ebooks/123",
@@ -242,6 +361,15 @@ class PipelineTests(unittest.TestCase):
                              ["accepted", "duplicate", "needs_review", "failed"])
             self.assertEqual(len(documents), 1)
             self.assertEqual(documents[0]["text"], corpus.clean_book(book_bytes(), {})[0])
+
+
+    def test_substantial_shared_prose_cannot_leak_between_splits(self):
+        shared = '\n\n'.join(PARAGRAPH.replace('Mira', name) for name in ('Ariel', 'Nora', 'Laura', 'Clara'))
+        docs = [{'id': '1', 'split': 'train', 'text': shared},
+                {'id': '2', 'split': 'validation', 'text': shared + '\n\nA changed ending.'}]
+        self.assertEqual(corpus.overlapping_editions(docs), {'2': ['1']})
+        docs[1]['split'] = 'train'
+        self.assertEqual(corpus.overlapping_editions(docs), {})
 
 
 class FakeResponse(io.BytesIO):
