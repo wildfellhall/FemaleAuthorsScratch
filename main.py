@@ -1,11 +1,4 @@
 """
-FEMALE AUTHORS SCRATCH — ALL-IN-ONE GOOGLE COLAB COPY/PASTE FILE
-
-This is the only file you need to copy into Google Colab. Paste each numbered
-CELL section into its own code cell, including its comment heading, and run
-cells in order. No repository clone, ZIP upload, or separate source files needed.
-Choose Runtime > Change runtime type > A100 GPU before running.
-
 Cell guide:
   1. Google Drive, paths, session settings
   2. Editable corpus list (append books here)
