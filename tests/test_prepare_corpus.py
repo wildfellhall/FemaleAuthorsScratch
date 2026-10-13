@@ -1,49 +1,54 @@
-"""Small invented fixtures only. These tests never access the network."""
+"""Offline tests of the actual notebook functions; no source-file generation."""
 import ast
-import atexit
 import contextlib
 import io
 import json
 from pathlib import Path
 import re
-import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-# Test the only application source in the repository. Materialize its embedded
-# modules into an isolated temporary directory, never into the checkout.
-COLAB_PATH = Path(__file__).resolve().parents[1] / "COLAB_ALL_IN_ONE.py"
-COLAB_SOURCE = COLAB_PATH.read_text(encoding="utf-8")
-COLAB_TREE = ast.parse(COLAB_SOURCE, filename=str(COLAB_PATH))
-EMBEDDED_FILES = {}
-for statement in COLAB_TREE.body:
-    call = statement.value if isinstance(statement, ast.Expr) else None
-    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute) or call.func.attr != "write_text":
-        continue
-    destination = call.func.value
-    if not isinstance(destination, ast.BinOp) or not isinstance(destination.op, ast.Div) or not isinstance(destination.left, ast.Name) or destination.left.id != "PROJECT":
-        continue
-    filename = ast.literal_eval(destination.right)
-    if Path(filename).name != filename or filename in EMBEDDED_FILES:
-        raise ValueError(f"Invalid/repeated embedded filename: {filename}")
-    EMBEDDED_FILES[filename] = ast.literal_eval(call.args[0])
+NOTEBOOK_PATH = Path(__file__).resolve().parents[1] / "main.py"
+SOURCE = NOTEBOOK_PATH.read_text(encoding="utf-8")
+HEADERS = list(re.finditer(r"^# %% Cell (\d+):[^\n]*\n", SOURCE, re.M))
+CELLS = {int(header[1]): SOURCE[header.end():HEADERS[i + 1].start() if i + 1 < len(HEADERS) else len(SOURCE)]
+         for i, header in enumerate(HEADERS)}
+corpus = types.ModuleType("notebook_cleaner")
+sys.modules[corpus.__name__] = corpus
+exec(compile(CELLS[3], "cell-3", "exec"), corpus.__dict__)
 
-CELL_HEADERS = list(re.finditer(r"^# ={76}\n# CELL (\d+): [^\n]+\n# ={76}\n\n", COLAB_SOURCE, re.M))
-COLAB_CELLS = {
-    int(match[1]): COLAB_SOURCE[match.end():CELL_HEADERS[index + 1].start() if index + 1 < len(CELL_HEADERS) else len(COLAB_SOURCE)]
-    for index, match in enumerate(CELL_HEADERS)
-}
-_RUNTIME = tempfile.TemporaryDirectory(prefix="femaleauthors-tests-")
-atexit.register(_RUNTIME.cleanup)
-RUNTIME_DIR = Path(_RUNTIME.name)
-for filename, contents in EMBEDDED_FILES.items():
-    (RUNTIME_DIR / filename).write_text(contents, encoding="utf-8")
-sys.path.insert(0, str(RUNTIME_DIR))
 
-import prepare_corpus as corpus
+class NotebookFormatTests(unittest.TestCase):
+    def test_full_file_and_individual_cells_compile(self):
+        self.assertEqual(list(CELLS), list(range(1, 8)))
+        compile(SOURCE, str(NOTEBOOK_PATH), "exec")
+        for number, source in CELLS.items():
+            with self.subTest(cell=number):
+                ast.parse(source, feature_version=(3, 10))
+                compile(source, f"cell-{number}", "exec")
+
+    def test_corpus_cell_is_directly_editable(self):
+        scope = {}
+        exec(CELLS[2], scope)
+        self.assertTrue(corpus.load_books(scope["sources"]))
+        self.assertIsInstance(scope["CLEANING_RULES"], dict)
+
+    def test_no_drive_mount_or_generated_modules(self):
+        tree = ast.parse(SOURCE)
+        imports = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
+        self.assertNotIn("google.colab", imports)
+        self.assertNotIn("/content/drive", SOURCE)
+        # The only subprocess is dependency installation, never the workflow itself.
+        commands = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "subprocess"]
+        self.assertEqual(len(commands), 1)
+
 
 PARAGRAPH = (
     'Mira opened the door and watched the rain cross the empty garden. '
@@ -68,79 +73,6 @@ def book_bytes(body=NARRATIVE, book_id='123', newline='\n'):
 
 def rules_for(data, **kwargs):
     return {'raw_sha256': corpus.sha256(data), **kwargs}
-
-
-class ColabFormatTests(unittest.TestCase):
-    def test_entire_file_each_cell_and_embedded_python_compile(self):
-        self.assertEqual(list(COLAB_CELLS), list(range(1, 14)))
-        compile(COLAB_SOURCE, str(COLAB_PATH), 'exec')
-        for number, source in COLAB_CELLS.items():
-            with self.subTest(cell=number):
-                ast.parse(source, feature_version=(3, 10))
-                compile(source, f'cell-{number}', 'exec')
-        for name, source in EMBEDDED_FILES.items():
-            if name.endswith('.py'):
-                with self.subTest(module=name):
-                    ast.parse(source, feature_version=(3, 10))
-                    compile(source, name, 'exec')
-            elif name.endswith('.json'):
-                json.loads(source)
-
-    def test_cells_materialize_all_required_files_without_other_sources(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            project = Path(tmp)
-            scope = {'PROJECT': project, 'subprocess': subprocess, 'sys': sys}
-            with contextlib.redirect_stdout(io.StringIO()), patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as commands:
-                for number in range(2, 11):
-                    exec(compile(COLAB_CELLS[number], f'cell-{number}', 'exec'), scope)
-            self.assertEqual({path.name for path in project.iterdir()}, set(EMBEDDED_FILES))
-            for name, source in EMBEDDED_FILES.items():
-                self.assertEqual((project / name).read_bytes(), source.encode('utf-8'))
-            self.assertEqual(commands.call_count, 2)
-            self.assertEqual(commands.call_args_list[0].args[0], [sys.executable, '-m', 'pip', 'install', '-q', '-r', str(project / 'requirements-colab.txt')])
-            self.assertEqual(commands.call_args_list[1].args[0], ['nvidia-smi'])
-
-    def test_required_runtime_files_and_config_are_present(self):
-        self.assertEqual(set(EMBEDDED_FILES), {
-            'corpus-list.py', 'corpus_registry.py', 'prepare_corpus.py',
-            'training_data.py', 'train_gpt2.py', 'generate.py',
-            'cleaning_rules.json', 'training_config.json', 'requirements-colab.txt',
-        })
-        from train_gpt2 import TrainConfig
-        TrainConfig(**json.loads(EMBEDDED_FILES['training_config.json'])).validate()
-        self.assertTrue(corpus.load_books(RUNTIME_DIR / 'corpus-list.py'))
-        self.assertIsInstance(corpus.load_rules(RUNTIME_DIR / 'cleaning_rules.json'), dict)
-        self.assertEqual(Path(corpus.__file__).parent, RUNTIME_DIR)
-
-    def test_preparation_training_and_generation_cells_execute(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            prepared = root / 'corpus' / 'runs' / 'test'
-            prepared.mkdir(parents=True)
-            output = root / 'run'
-            output.mkdir()
-            corpus.write_json(root / 'corpus' / 'latest.json', {'run': str(prepared), 'relative_run': 'runs/test'})
-            corpus.write_json(prepared / 'report.json', {
-                'sources_sha256': corpus.sha256(EMBEDDED_FILES['corpus-list.py'].encode()),
-                'rules_sha256': corpus.sha256(EMBEDDED_FILES['cleaning_rules.json'].encode()),
-                'counts': {'accepted': 1}, 'complete': True,
-            })
-            (prepared / 'manifest.jsonl').write_text('{"status":"accepted"}\n')
-            corpus.write_json(output / 'run.json', {})
-            corpus.write_json(output / 'result.json', {'complete': True})
-            scope = {'PROJECT': RUNTIME_DIR, 'CORPUS': root / 'corpus', 'OUTPUT': output,
-                     'REBUILD_CORPUS': False, 'ALLOW_PARTIAL_CORPUS': False,
-                     'MAX_SESSION_SECONDS': 7200, 'Path': Path, 'json': json,
-                     'subprocess': subprocess, 'sys': sys}
-            with contextlib.redirect_stdout(io.StringIO()), patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as commands:
-                for number in (11, 12, 13):
-                    exec(compile(COLAB_CELLS[number], f'cell-{number}', 'exec'), scope)
-            self.assertEqual(scope['prepared'], prepared)
-            self.assertEqual(commands.call_count, 2)
-            training = commands.call_args_list[0].args[0]
-            self.assertEqual(training[:2], [sys.executable, str(RUNTIME_DIR / 'train_gpt2.py')])
-            self.assertIn('--resume', training)
-            self.assertEqual(commands.call_args_list[1].args[0][:2], [sys.executable, str(RUNTIME_DIR / 'generate.py')])
 
 
 class CleaningTests(unittest.TestCase):
@@ -273,68 +205,43 @@ class CleaningTests(unittest.TestCase):
 
 
 class PipelineTests(unittest.TestCase):
-    def test_source_is_not_executed(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'sources.py'
-            path.write_text('raise RuntimeError("must never execute")\nsources = [\n"https://www.gutenberg.org/files/123/123-0.txt", # An Invented Book\n]\n')
-            books = corpus.load_books(path)
-            self.assertEqual(books[0].id, '123')
-            self.assertEqual(books[0].note, 'An Invented Book')
+    def test_growth_and_grouping_are_independent_of_list_length(self):
+        entries = ["https://www.gutenberg.org/ebooks/123",
+                   {"url": "https://www.gutenberg.org/ebooks/124", "work_id": "shared"}]
+        before = corpus.load_books(entries)
+        entries.append({"url": "https://www.gutenberg.org/ebooks/125", "work_id": "shared"})
+        after = corpus.load_books(entries)
+        self.assertEqual(before, after[:2])
+        self.assertEqual(after[1].work_id, after[2].work_id)
+        self.assertEqual(len(corpus.load_books(entries + [entries[0]])), 3)
 
-    def test_nonliteral_input_rejected(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / 'sources.py'
-            path.write_text('sources = [str(123)]')
-            with self.assertRaises(corpus.CorpusError):
-                corpus.load_books(path)
+    def test_conflicting_group_and_invalid_entries_rejected(self):
+        url = "https://www.gutenberg.org/ebooks/123"
+        for entries in ([{"url": url, "work_id": "a"}, {"url": url, "work_id": "b"}],
+                        [], [123], [{"url": url, "work_id": 3}], ["http://example.com/123"]):
+            with self.subTest(entries=entries), self.assertRaises(corpus.CorpusError):
+                corpus.load_books(entries)
 
-    def test_chunks_are_lossless_and_bounded(self):
-        for maximum in (1, 17, 1024):
-            pieces = list(corpus.chunks(NARRATIVE, maximum))
-            self.assertEqual(''.join(pieces), NARRATIVE)
-            self.assertTrue(all(0 < len(piece.split()) <= maximum for piece in pieces))
-
-    def test_volumes_share_split(self):
-        def key(note):
-            return corpus.work_key(corpus.Book('123', '', note), {})
-        for a, b in [('Daisy Burns (Volume 1) by Julia Kavanagh', 'Daisy Burns (Volume 2) by Julia Kavanagh'), ('Lodore, Vol. 1 (of 3) by Shelley', 'Lodore, Vol. 3 (of 3) by Shelley'), ('Cecilia — Volume 1 by Burney', 'Cecilia — Volume 2 by Burney')]:
-            self.assertEqual(key(a), key(b))
-            self.assertEqual(corpus.split_for(key(a), 'seed', .05, .05), corpus.split_for(key(b), 'seed', .05, .05))
-
-    def test_complete_offline_pipeline(self):
+    def test_offline_preparation_reviews_failures_and_deduplicates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            sources, rules = root / 'sources.py', root / 'rules.json'
-            ids = ['123', '124', '125', '126']
-            sources.write_text('sources = ' + repr([f'https://www.gutenberg.org/files/{i}/{i}-0.txt' for i in ids]))
-            corpus.write_json(rules, {'version': 1, 'books': {}})
-            raw = root / 'out' / 'raw'
-            raw.mkdir(parents=True)
-            for book_id in ids[:3]:
-                data = book_bytes(NARRATIVE if book_id != '125' else PARAGRAPH * 3, book_id)
-                (raw / f'{book_id}.txt').write_bytes(data)
-                corpus.write_json(raw / f'{book_id}.json', {'id': book_id, 'source_url': f'https://www.gutenberg.org/files/{book_id}/{book_id}-0.txt', 'sha256': corpus.sha256(data)})
-            arguments = ['--sources', str(sources), '--output', str(root / 'out'), '--overrides', str(rules), '--offline', '--chunk-words', '40']
-            with patch.object(corpus, 'urlopen', side_effect=AssertionError('Tests cannot access network')), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(corpus.main(arguments), 1)
-            latest = json.loads((root / 'out' / 'latest.json').read_text())
-            run = Path(latest['run'])
-            records = [json.loads(line) for line in (run / 'manifest.jsonl').read_text().splitlines()]
-            self.assertEqual([r['status'] for r in records], ['accepted', 'duplicate', 'needs_review', 'failed'])
-            samples = [json.loads(line) for split in ('train', 'validation', 'test') for line in (run / f'{split}.jsonl').read_text().splitlines()]
-            self.assertTrue(samples)
-            self.assertEqual({s['book_id'] for s in samples}, {'123'})
-            self.assertEqual(''.join(s['text'] for s in samples), corpus.clean_book(book_bytes(), {})[0])
-            self.assertFalse((run / 'clean').exists())
-            self.assertFalse((run / 'review').exists())
-            self.assertTrue((run / 'audit.html').exists())
-            self.assertFalse(latest['complete'])
-            # A second run has no stale samples from the first.
-            with patch.object(corpus, 'urlopen', side_effect=AssertionError('Tests cannot access network')), contextlib.redirect_stdout(io.StringIO()):
-                corpus.main(arguments + ['--ids', '125'])
-            second = Path(json.loads((root / 'out' / 'latest.json').read_text())['run'])
-            self.assertNotEqual(run, second)
-            self.assertEqual((second / 'train.jsonl').read_text(), '')
+            raw = root / "raw"
+            raw.mkdir()
+            entries = [f"https://www.gutenberg.org/files/{i}/{i}-0.txt" for i in range(123, 127)]
+            for book_id in ("123", "124", "125"):
+                content = book_bytes(PARAGRAPH * 3 if book_id == "125" else NARRATIVE, book_id)
+                (raw / f"{book_id}.txt").write_bytes(content)
+                corpus.write_json(raw / f"{book_id}.json", {"id": book_id,
+                    "source_url": f"https://www.gutenberg.org/files/{book_id}/{book_id}-0.txt",
+                    "sha256": corpus.sha256(content)})
+            with patch.object(corpus, "urlopen", side_effect=AssertionError("No network")), contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(corpus.CorpusError, "audit.json"):
+                    corpus.prepare_books(entries, {}, root, offline=True)
+                documents = corpus.prepare_books(entries, {}, root, allow_partial=True, offline=True)
+            self.assertEqual([row["status"] for row in json.loads((root / "audit.json").read_text())],
+                             ["accepted", "duplicate", "needs_review", "failed"])
+            self.assertEqual(len(documents), 1)
+            self.assertEqual(documents[0]["text"], corpus.clean_book(book_bytes(), {})[0])
 
 
 class FakeResponse(io.BytesIO):

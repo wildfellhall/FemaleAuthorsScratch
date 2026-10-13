@@ -3,5 +3,6 @@ __pycache__/
 .venv/
 data/
 runs/
-colab_project.zip
+female-authors/
+female-authors-model.zip
 .DS_Store
