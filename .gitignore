@@ -5,4 +5,6 @@ data/
 runs/
 female-authors/
 female-authors-model.zip
+*.gguf
+*.gguf.partial
 .DS_Store
