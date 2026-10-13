@@ -105,21 +105,20 @@ config.validate()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% Cell 2: Corpus list and cleaning rules
-# Append URLs freely. Related volumes/editions should share an explicit work_id.
 sources = [
-    "https://www.gutenberg.org/files/1342/1342-0.txt",   #Pride and Prejudice by Jane Austen - written anonymously
-    "https://www.gutenberg.org/files/3268/3268-0.txt",   #The Mysteries of Udolpho by Ann Ward Radcliffe - seminal work often referenced in women's novels of the 19th century
-    "https://www.gutenberg.org/files/21839/21839-0.txt", #Sense and Sensibility by Jane Austen - written anonymously
-    "https://www.gutenberg.org/files/121/121-0.txt",     #Northanger Abbey by Jane Austen - written anonymously
-    "https://www.gutenberg.org/files/158/158-0.txt",     #Emma by Jane Austen - written anonymously
-    "https://www.gutenberg.org/files/105/105-0.txt",     #Persuasion by Jane Austen - written anonymously
-    "https://www.gutenberg.org/files/141/141-0.txt",     #Mansfield Park by Jane Austen - written anonymously
-    "https://www.gutenberg.org/files/145/145-0.txt",     #Middlemarch by George Eliot - pseudonym used (real name: Mary Ann Evans)
-    "https://www.gutenberg.org/files/550/550-0.txt",     #Silas Marner by George Eliot - pseudonym used (real name: Mary Ann Evans)
-    "https://www.gutenberg.org/files/507/507-0.txt",     #Adam Bede by George Eliot - pseudonym used (real name: Mary Ann Evans)
-    "https://www.gutenberg.org/files/6688/6688-0.txt",   #The Mill on the Floss by George Eliot - pseudonym used (real name: Mary Ann Evans)
-    "https://www.gutenberg.org/files/7469/7469-0.txt",   #Daniel Deronda by George Eliot - pseudonym used (real name: Mary Ann Evans)
-    "https://www.gutenberg.org/files/24020/24020-0.txt", #Romola by George Eliot - pseudonym used (real name: Mary Ann Evans)
+    "https://www.gutenberg.org/files/1342/1342-0.txt",   #Pride and Prejudice by Jane Austen
+    "https://www.gutenberg.org/files/3268/3268-0.txt",   #The Mysteries of Udolpho by Ann Ward Radcliffe
+    "https://www.gutenberg.org/files/21839/21839-0.txt", #Sense and Sensibility by Jane Austen
+    "https://www.gutenberg.org/files/121/121-0.txt",     #Northanger Abbey by Jane Austen
+    "https://www.gutenberg.org/files/158/158-0.txt",     #Emma by Jane Austen
+    "https://www.gutenberg.org/files/105/105-0.txt",     #Persuasion by Jane Austen
+    "https://www.gutenberg.org/files/141/141-0.txt",     #Mansfield Park by Jane Austen
+    "https://www.gutenberg.org/files/145/145-0.txt",     #Middlemarch by George Eliot
+    "https://www.gutenberg.org/files/550/550-0.txt",     #Silas Marner by George Eliot
+    "https://www.gutenberg.org/files/507/507-0.txt",     #Adam Bede by George Eliot
+    "https://www.gutenberg.org/files/6688/6688-0.txt",   #The Mill on the Floss by George Eliot
+    "https://www.gutenberg.org/files/7469/7469-0.txt",   #Daniel Deronda by George Eliot
+    "https://www.gutenberg.org/files/24020/24020-0.txt", #Romola by George Eliot
     "https://www.gutenberg.org/files/969/969-0.txt",     #The Tenant of Wildfell Hall by Anne Brontë
     "https://www.gutenberg.org/files/767/767-0.txt",     #Agnes Grey by Anne Brontë
     "https://www.gutenberg.org/files/1028/1028-0.txt",   #The Professor by Charlotte Brontë
@@ -161,8 +160,8 @@ sources = [
     "https://www.gutenberg.org/files/2351/2351-0.txt",   #John Halifax, Gentleman by Dinah Maria Mulock Craik
     "https://www.gutenberg.org/files/13461/13461-0.txt", #Mistress and Maid: A Household Story by Dinah Maria Mulock Craik
     "https://www.gutenberg.org/files/14708/14708-0.txt", #The Laurel Bush: An Old-Fashioned Love Story by Dinah Maria Mulock Craik
-    {'url': 'https://www.gutenberg.org/files/36157/36157-0.txt', 'work_id': 'daisy burns by julia kavanagh'}, #Daisy Burns (Volume 1) by Julia Kavanagh
-    {'url': 'https://www.gutenberg.org/files/36158/36158-0.txt', 'work_id': 'daisy burns by julia kavanagh'}, #Daisy Burns (Volume 2) by Julia Kavanagh
+    "https://www.gutenberg.org/files/36157/36157-0.txt", #Daisy Burns (Volume 1) by Julia Kavanagh
+    "https://www.gutenberg.org/files/36158/36158-0.txt", #Daisy Burns (Volume 2) by Julia Kavanagh
     "https://www.gutenberg.org/files/36160/36160-0.txt", #Rachel Gray: A Tale Founded on Fact by Julia Kavanagh
     "https://www.gutenberg.org/files/1952/1952-0.txt",   #The Yellow Wallpaper by Charlotte Perkins Gilman
     "https://www.gutenberg.org/files/3016/3016-0.txt",   #What Diantha Did by Charlotte Perkins Gilman
@@ -171,14 +170,14 @@ sources = [
     "https://www.gutenberg.org/files/171/171-0.txt",     #Charlotte Temple by Mrs. Rowson
     "https://www.gutenberg.org/files/5182/5182-0.txt",   #The Old English Baron: a Gothic Story by Clara Reeve
     "https://www.gutenberg.org/files/23810/23810-0.txt", #At Fault by Kate Chopin
-    {'url': 'https://www.gutenberg.org/files/6346/6346-0.txt', 'work_id': 'cecilia or memoirs of an heiress by fanny burney'},   #Cecilia; Or, Memoirs of an Heiress — Volume 1 by Fanny Burney
-    {'url': 'https://www.gutenberg.org/files/7146/7146-0.txt', 'work_id': 'cecilia or memoirs of an heiress by fanny burney'},   #Cecilia; Or, Memoirs of an Heiress — Volume 2 by Fanny Burney
-    {'url': 'https://www.gutenberg.org/files/7152/7152-0.txt', 'work_id': 'cecilia or memoirs of an heiress by fanny burney'},   #Cecilia; Or, Memoirs of an Heiress — Volume 3 by Fanny Burney
-    {'url': 'https://www.gutenberg.org/files/37437/37437-0.txt', 'work_id': 'the wanderer or female difficulties by fanny burney'}, #The Wanderer; or, Female Difficulties (Volume 1 of 5) by Fanny Burney
-    {'url': 'https://www.gutenberg.org/files/37438/37438-0.txt', 'work_id': 'the wanderer or female difficulties by fanny burney'}, #The Wanderer; or, Female Difficulties (Volume 2 of 5) by Fanny Burney
-    {'url': 'https://www.gutenberg.org/files/37439/37439-0.txt', 'work_id': 'the wanderer or female difficulties by fanny burney'}, #The Wanderer; or, Female Difficulties (Volume 3 of 5) by Fanny Burney
-    {'url': 'https://www.gutenberg.org/files/37440/37440-0.txt', 'work_id': 'the wanderer or female difficulties by fanny burney'}, #The Wanderer; or, Female Difficulties (Volume 4 of 5) by Fanny Burney
-    {'url': 'https://www.gutenberg.org/files/37441/37441-0.txt', 'work_id': 'the wanderer or female difficulties by fanny burney'}, #The Wanderer; or, Female Difficulties (Volume 5 of 5) by Fanny Burney
+    "https://www.gutenberg.org/files/6346/6346-0.txt",   #Cecilia; Or, Memoirs of an Heiress — Volume 1 by Fanny Burney
+    "https://www.gutenberg.org/files/7146/7146-0.txt",   #Cecilia; Or, Memoirs of an Heiress — Volume 2 by Fanny Burney
+    "https://www.gutenberg.org/files/7152/7152-0.txt",   #Cecilia; Or, Memoirs of an Heiress — Volume 3 by Fanny Burney
+    "https://www.gutenberg.org/files/37437/37437-0.txt", #The Wanderer; or, Female Difficulties (Volume 1 of 5) by Fanny Burney
+    "https://www.gutenberg.org/files/37438/37438-0.txt", #The Wanderer; or, Female Difficulties (Volume 2 of 5) by Fanny Burney
+    "https://www.gutenberg.org/files/37439/37439-0.txt", #The Wanderer; or, Female Difficulties (Volume 3 of 5) by Fanny Burney
+    "https://www.gutenberg.org/files/37440/37440-0.txt", #The Wanderer; or, Female Difficulties (Volume 4 of 5) by Fanny Burney
+    "https://www.gutenberg.org/files/37441/37441-0.txt", #The Wanderer; or, Female Difficulties (Volume 5 of 5) by Fanny Burney
     "https://www.gutenberg.org/files/40882/40882-0.txt", #Felix Holt, the Radical by George Eliot
     "https://www.gutenberg.org/files/2165/2165-0.txt",   #The Lifted Veil by George Eliot
     "https://www.gutenberg.org/files/2171/2171-0.txt",   #Brother Jacob by George Eliot
@@ -214,15 +213,15 @@ sources = [
     "https://www.gutenberg.org/files/2548/2548-0.txt",   #The Poor Clare by Elizabeth Cleghorn Gaskell
     "https://www.gutenberg.org/files/17780/17780-0.txt", #Scenes of Clerical Life by George Eliot
     "https://www.gutenberg.org/files/30273/30273-0.txt", #Tom and Maggie Tulliver by George Eliot
-    {'url': 'https://www.gutenberg.org/files/74643/74643-0.txt', 'work_id': 'the italian or the confessional of the black penitents'}, #The Italian, Volume 1 (of 3) : or, the confessional of the Black Penitents
-    {'url': 'https://www.gutenberg.org/files/74640/74640-0.txt', 'work_id': 'the italian or the confessional of the black penitents'}, #The Italian, Volume 2 (of 3) : or, the confessional of the Black Penitents
+    "https://www.gutenberg.org/files/74643/74643-0.txt", #The Italian, Volume 1 (of 3) : or, the confessional of the Black Penitents
+    "https://www.gutenberg.org/files/74640/74640-0.txt", #The Italian, Volume 2 (of 3) : or, the confessional of the Black Penitents
     "https://www.gutenberg.org/files/66749/66749-0.txt", #The Fortunes of Perkin Warbeck: a romance by Mary Wollstonecraft Shelley
-    {'url': 'https://www.gutenberg.org/files/63337/63337-0.txt', 'work_id': 'valperga by mary wollstonecraft shelley'}, #Valperga Volume 1 (of 3) by Mary Wollstonecraft Shelley
-    {'url': 'https://www.gutenberg.org/files/63338/63338-0.txt', 'work_id': 'valperga by mary wollstonecraft shelley'}, #Valperga Volume 2 (of 3) by Mary Wollstonecraft Shelley
-    {'url': 'https://www.gutenberg.org/files/63339/63339-0.txt', 'work_id': 'valperga by mary wollstonecraft shelley'}, #Valperga Volume 3 (of 3) by Mary Wollstonecraft Shelley
-    {'url': 'https://www.gutenberg.org/files/64555/64555-0.txt', 'work_id': 'lodore by mary wollstonecraft shelley'}, #Lodore, Vol. 1 (of 3) by Mary Wollstonecraft Shelley
-    {'url': 'https://www.gutenberg.org/files/64556/64556-0.txt', 'work_id': 'lodore by mary wollstonecraft shelley'}, #Lodore, Vol. 2 (of 3) by Mary Wollstonecraft Shelley
-    {'url': 'https://www.gutenberg.org/files/64557/64557-0.txt', 'work_id': 'lodore by mary wollstonecraft shelley'}, #Lodore, Vol. 3 (of 3) by Mary Wollstonecraft Shelley
+    "https://www.gutenberg.org/files/63337/63337-0.txt", #Valperga Volume 1 (of 3) by Mary Wollstonecraft Shelley
+    "https://www.gutenberg.org/files/63338/63338-0.txt", #Valperga Volume 2 (of 3) by Mary Wollstonecraft Shelley
+    "https://www.gutenberg.org/files/63339/63339-0.txt", #Valperga Volume 3 (of 3) by Mary Wollstonecraft Shelley
+    "https://www.gutenberg.org/files/64555/64555-0.txt", #Lodore, Vol. 1 (of 3) by Mary Wollstonecraft Shelley
+    "https://www.gutenberg.org/files/64556/64556-0.txt", #Lodore, Vol. 2 (of 3) by Mary Wollstonecraft Shelley
+    "https://www.gutenberg.org/files/64557/64557-0.txt", #Lodore, Vol. 3 (of 3) by Mary Wollstonecraft Shelley
     "https://www.gutenberg.org/files/35638/35638-0.txt", #Leonora by Maria Edgeworth
     "https://www.gutenberg.org/files/2129/2129-0.txt",   #Murad the Unlucky, and Other Tales by Maria Edgeworth
     "https://www.gutenberg.org/files/62219/62219-0.txt", #The Day of Small Things by Anne Manning
@@ -292,6 +291,9 @@ sources = [
     "https://www.gutenberg.org/files/26156/26156-0.txt", #Hopes and Fears by Charlotte M. Yonge
     "https://www.gutenberg.org/files/203/203-0.txt",     #Uncle Tom's Cabin by Harriet Beecher Stowe
     "https://www.gutenberg.org/files/12354/12354-0.txt", #Pink and White Tyranny by Harriet Beecher Stowe
+    "https://www.gutenberg.org/files/55012/55012-0.txt", #Dred: A Tale of the Great Dismal Swamp by Harriet Beecher Stowe
+    "https://www.gutenberg.org/files/47874/47874-0.txt", #My Wife and I; Or, Harry Henderson's History by Harriet Beecher Stowe
+    "https://www.gutenberg.org/files/31522/31522-0.txt", #The Pearl of Orr's Island: A Story of the Coast of Maine by Harriet Beecher Stowe
 ]
 
 CLEANING_RULES = {}  # Example: {"123": {"raw_sha256": "...", "start": {"text": "CHAPTER I."}}}
