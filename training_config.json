@@ -1,0 +1,23 @@
+{
+  "vocab_size": 32768,
+  "min_frequency": 2,
+  "context_length": 1024,
+  "n_layer": 12,
+  "n_head": 12,
+  "n_embd": 768,
+  "dropout": 0.1,
+  "batch_size": 8,
+  "gradient_accumulation": 8,
+  "epochs": 3,
+  "max_steps": 0,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.1,
+  "warmup_fraction": 0.03,
+  "max_grad_norm": 1.0,
+  "eval_every": 200,
+  "save_every": 100,
+  "log_every": 10,
+  "keep_checkpoints": 2,
+  "gradient_checkpointing": true,
+  "seed": 42
+}

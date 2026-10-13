@@ -1,3 +1,6 @@
+# Single source of truth: append URLs freely; no fixed length is used.
+# For stable grouping across volumes/editions, entries may also be dictionaries:
+# {"url": "https://www.gutenberg.org/ebooks/123", "work_id": "author-work", "note": "Title by Author"}
 # The isolated corpus list along with notes on authors, fecundity, genre, time period, etc.
 sources = [
     "https://www.gutenberg.org/files/1342/1342-0.txt",   #Pride and Prejudice by Jane Austen - written anonymously

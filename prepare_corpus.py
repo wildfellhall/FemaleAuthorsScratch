@@ -1,16 +1,15 @@
+#!/usr/bin/env python3
 """Download, audit, and prepare a Gutenberg corpus. Python 3.10+, no dependencies.
-    Trying to be extra careful with the parser since this is a from-scratch model. 
+
+Trying to be extra careful with the parser since this is a from-scratch model.
 """
 from __future__ import annotations
 
 import argparse
-import ast
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import html
-import io
 from http.client import HTTPException
 import json
 import math
@@ -18,30 +17,19 @@ from pathlib import Path
 import re
 import sys
 import time
-import tokenize
 import unicodedata
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from email.utils import parsedate_to_datetime
 
-VERSION = "1.0"
+from corpus_registry import Book, CorpusError, DEFAULT_SOURCES, load_books, split_for, work_key
+
+VERSION = "2.0"
 DEFAULT_MIRROR = "https://gutenberg.pglaf.org"
-URL_RE = re.compile(r"https://(?:www\.)?gutenberg\.org/files/(\d+)/\1-0\.txt\Z")
 START = re.compile(r"(?im)^[ \t]*\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*\*{3}[^\n]*$")
 END = re.compile(r"(?im)^[ \t]*\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*\*{3}[^\n]*$")
 LEGACY_END = re.compile(r"(?im)^[ \t]*End of (?:the )?Project Gutenberg(?:'s)? (?:EBook|Etext)\b[^\n]*$")
-
-
-class CorpusError(Exception):
-    """A recoverable per-book input, network, or quality error."""
-
-
-@dataclass(frozen=True)
-class Book:
-    id: str
-    url: str
-    note: str = ""
 
 
 def sha256(data: bytes) -> str:
@@ -53,34 +41,6 @@ def write_json(path: Path, value: object) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
-
-
-def load_books(path: Path) -> list[Book]:
-    """Read the literal list without importing/executing the Python source."""
-    source = path.read_text(encoding="utf-8-sig")
-    tree = ast.parse(source, filename=str(path))
-    values = []
-    for node in tree.body:
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
-        if any(isinstance(t, ast.Name) and t.id == "sources" for t in targets):
-            values.append(node.value)
-    if len(values) != 1 or not isinstance(values[0], ast.List):
-        raise CorpusError("Expected exactly one literal Python list named sources.")
-    comments = {t.start[0]: t.string.lstrip("# ").strip() for t in tokenize.generate_tokens(io.StringIO(source).readline) if t.type == tokenize.COMMENT}
-    books, seen = [], set()
-    for element in values[0].elts:
-        if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
-            raise CorpusError("Every sources entry must be a literal URL string.")
-        match = URL_RE.fullmatch(element.value)
-        if not match:
-            raise CorpusError(f"Unexpected Gutenberg URL: {element.value!r}")
-        book_id = match[1]
-        if book_id not in seen:
-            books.append(Book(book_id, element.value, comments.get(element.end_lineno, "")))
-            seen.add(book_id)
-    if not books:
-        raise CorpusError("The sources list is empty.")
-    return books
 
 
 def decode_book(data: bytes) -> tuple[str, str]:
@@ -310,7 +270,11 @@ def tidy_layout(text: str, audit: list, reflow: bool) -> str:
     text = text.replace("\f", "\n\n")
     text = substitute(text, r"(?m)^[ \t]*(?:\[Page\s+\d+\]|\[Pg\.?\s*\d+\])[ \t]*$", "page_label", audit)
     # Underscores are Gutenberg's emphasis notation; keep the enclosed words.
-    text = substitute(text, r"_", "emphasis_marker", audit)
+    # Strip paired emphasis only; preserve literal underscores in words.
+    def unemphasize(match):
+        record_removal(audit, "emphasis_marker", "__")
+        return match[1]
+    text = re.sub(r"(?<!\w)_(?=\S)([^_]+?)(?<=\S)_(?!\w)", unemphasize, text)
     paragraphs = []
     for paragraph in re.split(r"\n[ \t]*\n+", text.strip()):
         lines = [line.rstrip() for line in paragraph.splitlines()]
@@ -338,7 +302,7 @@ def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow:
     original_chars = len(body)
     # Explicit digital artifacts can occur within either boundary.
     body = substitute(body, r"(?is)\[(?:Illustration\b|Illustrations\b)[^\[\]]{0,12000}\]", "illustration_caption", audit)
-    body = substitute(body, r"(?is)\[Transcriber[’']?s?\s+Note\b[^\[\]]{0,12000}\]", "bracketed_transcriber_note", audit)
+    body = substitute(body, r"(?is)\[Transcriber[’']?s?\s+Notes?\b[^\[\]]{0,12000}\]", "bracketed_transcriber_note", audit)
     # A terminal transcriber's section is safely bounded only near the end.
     notes = list(re.finditer(r"(?im)^[ \t]*(?:[*_ ]*)TRANSCRIBER[’']?S?[ \t]+NOTES?[.: \t*_]*$", body))
     if notes and notes[-1].start() > len(body) * 0.8:
@@ -386,26 +350,6 @@ def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow:
     return clean, {"encoding": encoding, "metadata": metadata, "boundary_method": method, "removals": audit, "findings": findings, "problems": problems, "words": len(clean.split()), "characters": len(clean), "original_body_characters": original_chars}
 
 
-def work_key(book: Book, rules: dict) -> str:
-    if rules.get("work_id"):
-        return rules["work_id"]
-    # Source comments are provenance, not book text. Volumes share a split.
-    title = re.split(r"\s+-\s+", book.note, maxsplit=1)[0]
-    title = re.sub(r"(?i)\(?\b(?:vol(?:ume)?s?\.?)\s*(?:\d+|[ivx]+)(?:\s*(?:of|[-–])\s*(?:\d+|[ivx]+))?\)?", "", title)
-    title = re.sub(r"(?i)\(of\s+\d+\)", "", title)
-    title = re.sub(r"[^\w]+", " ", unicodedata.normalize("NFC", title).casefold()).strip()
-    return title or f"gutenberg-{book.id}"
-
-
-def split_for(work_id: str, seed: str, validation: float, test: float) -> str:
-    value = int(sha256(f"{seed}\0{work_id}".encode())[:16], 16) / 2**64
-    if value < test:
-        return "test"
-    if value < test + validation:
-        return "validation"
-    return "train"
-
-
 def chunks(text: str, max_words: int):
     """Nonoverlapping character slices. Concatenating chunks restores exact text."""
     if max_words <= 0:
@@ -430,6 +374,8 @@ def load_rules(path: Path) -> dict:
     for book_id, rule in rules["books"].items():
         if not book_id.isdigit() or not isinstance(rule, dict) or set(rule) - allowed:
             raise CorpusError(f"Invalid or unknown rule fields for {book_id}.")
+        if "work_id" in rule and (not isinstance(rule["work_id"], str) or not rule["work_id"].strip()):
+            raise CorpusError(f"work_id must be a nonempty string for {book_id}.")
     return rules["books"]
 
 
@@ -438,6 +384,9 @@ def prepare(books: list[Book], downloader: Downloader, args) -> int:
     # A new directory per invocation prevents failed/partial runs reusing stale text.
     run = args.output / "runs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
     run.mkdir(parents=True)
+    # Preserve the exact editable inputs with the immutable output run.
+    (run / "corpus-list.py").write_bytes(args.sources.read_bytes())
+    (run / "cleaning_rules.json").write_bytes(args.overrides.read_bytes())
     records, seen_hashes, counts = [], {}, Counter()
     outputs = {}
     try:
@@ -468,7 +417,7 @@ def prepare(books: list[Book], downloader: Downloader, args) -> int:
                         split = split_for(work_id, args.seed, args.validation_fraction, args.test_fraction)
                         record.update(work_id=work_id, split=split, samples=0)
                         for number, chunk in enumerate(chunks(clean, args.chunk_words)):
-                            sample = {"id": f"{book.id}:{number}", "book_id": book.id, "work_id": work_id, "text": chunk}
+                            sample = {"id": f"{book.id}:{number}", "book_id": book.id, "work_id": work_id, "text": chunk, "chunk_index": number}
                             outputs[split].write(json.dumps(sample, ensure_ascii=False) + "\n")
                             record["samples"] += 1
                         counts[f"{split}_books"] += 1
@@ -488,10 +437,10 @@ def prepare(books: list[Book], downloader: Downloader, args) -> int:
     finally:
         for output in outputs.values():
             output.close()
-    report = {"version": VERSION, "requested": len(books), "counts": dict(counts), "complete": not (counts["failed"] or counts["needs_review"]), "sources_sha256": sha256(args.sources.read_bytes()), "rules_sha256": sha256(args.overrides.read_bytes()), "settings": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}}
+    report = {"version": VERSION, "requested": len(books), "counts": dict(counts), "complete": not (counts["failed"] or counts["needs_review"]), "sources_sha256": sha256((run / "corpus-list.py").read_bytes()), "rules_sha256": sha256((run / "cleaning_rules.json").read_bytes()), "settings": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}}
     write_json(run / "report.json", report)
     write_audit(run / "audit.html", records, report)
-    write_json(args.output / "latest.json", {"run": str(run.resolve()), "complete": report["complete"]})
+    write_json(args.output / "latest.json", {"run": str(run.resolve()), "relative_run": str(run.relative_to(args.output)), "complete": report["complete"]})
     print(f"Outputs: {run}\nAccepted: {counts['accepted']}; review: {counts['needs_review']}; failed: {counts['failed']}; duplicates: {counts['duplicate']}", flush=True)
     return 0 if report["complete"] else 1
 
@@ -512,7 +461,7 @@ def write_audit(path: Path, records: list[dict], report: dict) -> None:
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sources", type=Path, default=Path(__file__).with_name("corpus-list.py"))
+    parser.add_argument("--sources", type=Path, default=DEFAULT_SOURCES)
     parser.add_argument("--output", type=Path, default=Path("data/corpus"))
     parser.add_argument("--mirror", default=DEFAULT_MIRROR, help="Gutenberg collection root (uses the official PGLAF mirror by default)")
     parser.add_argument("--delay", type=float, default=2.0, help="Seconds between requests (default: 2)")

@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+data/
+runs/
+colab_project.zip
+.DS_Store
