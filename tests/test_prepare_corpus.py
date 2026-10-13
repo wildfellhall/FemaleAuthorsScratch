@@ -1,12 +1,47 @@
 """Small invented fixtures only. These tests never access the network."""
+import ast
+import atexit
 import contextlib
 import io
 import json
 from pathlib import Path
+import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
+
+# Test the only application source in the repository. Materialize its embedded
+# modules into an isolated temporary directory, never into the checkout.
+COLAB_PATH = Path(__file__).resolve().parents[1] / "COLAB_ALL_IN_ONE.py"
+COLAB_SOURCE = COLAB_PATH.read_text(encoding="utf-8")
+COLAB_TREE = ast.parse(COLAB_SOURCE, filename=str(COLAB_PATH))
+EMBEDDED_FILES = {}
+for statement in COLAB_TREE.body:
+    call = statement.value if isinstance(statement, ast.Expr) else None
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Attribute) or call.func.attr != "write_text":
+        continue
+    destination = call.func.value
+    if not isinstance(destination, ast.BinOp) or not isinstance(destination.op, ast.Div) or not isinstance(destination.left, ast.Name) or destination.left.id != "PROJECT":
+        continue
+    filename = ast.literal_eval(destination.right)
+    if Path(filename).name != filename or filename in EMBEDDED_FILES:
+        raise ValueError(f"Invalid/repeated embedded filename: {filename}")
+    EMBEDDED_FILES[filename] = ast.literal_eval(call.args[0])
+
+CELL_HEADERS = list(re.finditer(r"^# ={76}\n# CELL (\d+): [^\n]+\n# ={76}\n\n", COLAB_SOURCE, re.M))
+COLAB_CELLS = {
+    int(match[1]): COLAB_SOURCE[match.end():CELL_HEADERS[index + 1].start() if index + 1 < len(CELL_HEADERS) else len(COLAB_SOURCE)]
+    for index, match in enumerate(CELL_HEADERS)
+}
+_RUNTIME = tempfile.TemporaryDirectory(prefix="femaleauthors-tests-")
+atexit.register(_RUNTIME.cleanup)
+RUNTIME_DIR = Path(_RUNTIME.name)
+for filename, contents in EMBEDDED_FILES.items():
+    (RUNTIME_DIR / filename).write_text(contents, encoding="utf-8")
+sys.path.insert(0, str(RUNTIME_DIR))
 
 import prepare_corpus as corpus
 
@@ -33,6 +68,79 @@ def book_bytes(body=NARRATIVE, book_id='123', newline='\n'):
 
 def rules_for(data, **kwargs):
     return {'raw_sha256': corpus.sha256(data), **kwargs}
+
+
+class ColabFormatTests(unittest.TestCase):
+    def test_entire_file_each_cell_and_embedded_python_compile(self):
+        self.assertEqual(list(COLAB_CELLS), list(range(1, 14)))
+        compile(COLAB_SOURCE, str(COLAB_PATH), 'exec')
+        for number, source in COLAB_CELLS.items():
+            with self.subTest(cell=number):
+                ast.parse(source, feature_version=(3, 10))
+                compile(source, f'cell-{number}', 'exec')
+        for name, source in EMBEDDED_FILES.items():
+            if name.endswith('.py'):
+                with self.subTest(module=name):
+                    ast.parse(source, feature_version=(3, 10))
+                    compile(source, name, 'exec')
+            elif name.endswith('.json'):
+                json.loads(source)
+
+    def test_cells_materialize_all_required_files_without_other_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            scope = {'PROJECT': project, 'subprocess': subprocess, 'sys': sys}
+            with contextlib.redirect_stdout(io.StringIO()), patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as commands:
+                for number in range(2, 11):
+                    exec(compile(COLAB_CELLS[number], f'cell-{number}', 'exec'), scope)
+            self.assertEqual({path.name for path in project.iterdir()}, set(EMBEDDED_FILES))
+            for name, source in EMBEDDED_FILES.items():
+                self.assertEqual((project / name).read_bytes(), source.encode('utf-8'))
+            self.assertEqual(commands.call_count, 2)
+            self.assertEqual(commands.call_args_list[0].args[0], [sys.executable, '-m', 'pip', 'install', '-q', '-r', str(project / 'requirements-colab.txt')])
+            self.assertEqual(commands.call_args_list[1].args[0], ['nvidia-smi'])
+
+    def test_required_runtime_files_and_config_are_present(self):
+        self.assertEqual(set(EMBEDDED_FILES), {
+            'corpus-list.py', 'corpus_registry.py', 'prepare_corpus.py',
+            'training_data.py', 'train_gpt2.py', 'generate.py',
+            'cleaning_rules.json', 'training_config.json', 'requirements-colab.txt',
+        })
+        from train_gpt2 import TrainConfig
+        TrainConfig(**json.loads(EMBEDDED_FILES['training_config.json'])).validate()
+        self.assertTrue(corpus.load_books(RUNTIME_DIR / 'corpus-list.py'))
+        self.assertIsInstance(corpus.load_rules(RUNTIME_DIR / 'cleaning_rules.json'), dict)
+        self.assertEqual(Path(corpus.__file__).parent, RUNTIME_DIR)
+
+    def test_preparation_training_and_generation_cells_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = root / 'corpus' / 'runs' / 'test'
+            prepared.mkdir(parents=True)
+            output = root / 'run'
+            output.mkdir()
+            corpus.write_json(root / 'corpus' / 'latest.json', {'run': str(prepared), 'relative_run': 'runs/test'})
+            corpus.write_json(prepared / 'report.json', {
+                'sources_sha256': corpus.sha256(EMBEDDED_FILES['corpus-list.py'].encode()),
+                'rules_sha256': corpus.sha256(EMBEDDED_FILES['cleaning_rules.json'].encode()),
+                'counts': {'accepted': 1}, 'complete': True,
+            })
+            (prepared / 'manifest.jsonl').write_text('{"status":"accepted"}\n')
+            corpus.write_json(output / 'run.json', {})
+            corpus.write_json(output / 'result.json', {'complete': True})
+            scope = {'PROJECT': RUNTIME_DIR, 'CORPUS': root / 'corpus', 'OUTPUT': output,
+                     'REBUILD_CORPUS': False, 'ALLOW_PARTIAL_CORPUS': False,
+                     'MAX_SESSION_SECONDS': 7200, 'Path': Path, 'json': json,
+                     'subprocess': subprocess, 'sys': sys}
+            with contextlib.redirect_stdout(io.StringIO()), patch.object(subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as commands:
+                for number in (11, 12, 13):
+                    exec(compile(COLAB_CELLS[number], f'cell-{number}', 'exec'), scope)
+            self.assertEqual(scope['prepared'], prepared)
+            self.assertEqual(commands.call_count, 2)
+            training = commands.call_args_list[0].args[0]
+            self.assertEqual(training[:2], [sys.executable, str(RUNTIME_DIR / 'train_gpt2.py')])
+            self.assertIn('--resume', training)
+            self.assertEqual(commands.call_args_list[1].args[0][:2], [sys.executable, str(RUNTIME_DIR / 'generate.py')])
 
 
 class CleaningTests(unittest.TestCase):

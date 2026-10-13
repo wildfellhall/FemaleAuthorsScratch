@@ -12,12 +12,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from test_prepare_corpus import book_bytes, NARRATIVE, RUNTIME_DIR
+
 import corpus_registry
 import prepare_corpus as corpus
 import training_data as data
 from train_gpt2 import (PRE_SAMPLE_TRAINER_SHA256, TrainConfig, checkpoint_paths,
                         generate_samples, make_model, parse_args, resume_recipe_matches, train)
-from test_prepare_corpus import book_bytes, NARRATIVE
 
 HAS_TRAINING = all(importlib.util.find_spec(name) for name in ("torch", "transformers", "tokenizers", "numpy"))
 
@@ -117,7 +118,7 @@ class DataTests(CorpusFixture, unittest.TestCase):
             data.inspect_corpus(self.run, allow_partial=True)
 
 
-@unittest.skipUnless(HAS_TRAINING, 'Install requirements-colab.txt for ML integration tests')
+@unittest.skipUnless(HAS_TRAINING, 'Install the dependencies in COLAB_ALL_IN_ONE.py Cell 5 for ML integration tests')
 class TrainingTests(CorpusFixture, unittest.TestCase):
     def config(self):
         return TrainConfig(vocab_size=300, context_length=32, n_layer=1, n_head=2, n_embd=16,
@@ -173,7 +174,7 @@ class TrainingTests(CorpusFixture, unittest.TestCase):
         for name in a:
             torch.testing.assert_close(a[name], b[name], rtol=0, atol=0)
         self.assertEqual(completed['test']['target_tokens'], json.loads(next((self.root / 'tokens').glob('*/index.json')).read_text())['test']['target_tokens'])
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'generate.py'), '--model', str(self.root / 'resumed' / 'best_model'), '--prompt', 'A', '--max-new-tokens', '5'], capture_output=True, text=True)
+        result = subprocess.run([sys.executable, str(RUNTIME_DIR / 'generate.py'), '--model', str(self.root / 'resumed' / 'best_model'), '--prompt', 'A', '--max-new-tokens', '5'], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.stdout.strip())
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(corpus.CorpusError, 'settings'):

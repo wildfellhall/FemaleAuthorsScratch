@@ -1,7 +1,0 @@
-# Use Colab's CUDA-enabled PyTorch; do not replace it with a CPU-only wheel.
-# These Transformers / Tokenizers versions are the tested API pair.
-torch>=2.6,<3
-transformers==5.2.0
-tokenizers==0.22.2
-numpy>=1.26,<3
-safetensors>=0.4.3,<1

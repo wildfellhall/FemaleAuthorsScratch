@@ -19,11 +19,11 @@ FemaleAuthorsScratch trains a generative text model from scratch on a growing co
 | Session budget | Two hours of training per session, with resumable checkpoints |
 | Progress samples | Three fixed prompts every 100 optimizer updates; printed and saved |
 
-The output language-model head shares its weights with the token embeddings, so those parameters are counted once. With the default layer widths and context length, the exact count is **85,842,432 + 768 × actual vocabulary size**. A smaller learned vocabulary yields fewer parameters. Adding books changes the training data and step count; model size changes only when the learned vocabulary size or architecture changes. Defaults are defined in [`training_config.json`](training_config.json), and [`train_gpt2.py`](train_gpt2.py) reports the actual parameter count before training.
+The output language-model head shares its weights with the token embeddings, so those parameters are counted once. With the default layer widths and context length, the exact count is **85,842,432 + 768 × actual vocabulary size**. A smaller learned vocabulary yields fewer parameters. Adding books changes the training data and step count; model size changes only when the learned vocabulary size or architecture changes. Defaults are defined in **Cell 4** of `COLAB_ALL_IN_ONE.py`; **Cell 12** reports the actual parameter count before training.
 
-`prepare_corpus.py` reads the current entries in `corpus-list.py`, downloads their plain-text editions, removes digital boilerplate and identifiable non-narrative material, and writes model-training JSONL. Requires **Python 3.10+**, with no third-party dependencies. The input Python file is parsed, never executed.
+The cleaner reads the current corpus list, downloads its plain-text editions, removes digital boilerplate and identifiable non-narrative material, and writes model-training JSONL. Cleaning requires **Python 3.10+**, with no third-party dependencies. The input Python list is parsed, never executed.
 
-**Storage defaults:** each download is held in memory and processed individually. Raw books and separate cleaned-book copies are **not saved** unless requested. The final JSONL corpus still requires disk space. Each invocation creates a new output run; previous runs are retained.
+**Storage:** each download is processed individually. Cell 11 caches raw books on Drive so later runs can reuse them; separate cleaned-book copies are off by default. The final JSONL corpus also requires disk space. Each preparation invocation creates a new output run; previous runs are retained.
 
 ## Start in Google Colab — one copy/paste file
 
@@ -32,23 +32,17 @@ The output language-model head shares its weights with the token embeddings, so 
 3. Edit the corpus in **Cell 2**, cleaning rules in **Cell 3**, and model/training/sample settings in **Cell 4**. Set your run name and session options in **Cell 1**.
 4. **Cell 11** prepares the corpus and shows audit findings; **Cell 12** trains or resumes and prints samples every 100 optimizer updates; **Cell 13** generates text from the saved model.
 
-The existing source files are embedded verbatim. Their cells automatically write the modules and configuration into the Drive project directory, preserving the original imports, command-line behavior, and checkpoint fingerprints. You only copy from this one file. Run the complete source-writing cells, keeping their surrounding raw-string quotes and `write_text` calls. These cells write their displayed source/configuration into Drive, so carry over any prior edits made directly to the Drive copies before rerunning them. Existing source modules and the notebook remain available as alternative entry points.
+The existing code is embedded verbatim. Cells 2–10 automatically write the modules and configuration into the Drive project directory, preserving the original imports, command-line behavior, and checkpoint fingerprints. You only copy from this one file. Run each complete cell, keeping its surrounding raw-string quotes and `write_text` calls. Carry over any prior edits made directly to the Drive copies before rerunning these cells. The duplicate standalone files, ZIP builder, and notebook have been removed from the repository; the tests load their code directly from this file.
 
-## Alternate: existing notebook with ZIP upload
-
-1. Run `python3 make_colab_bundle.py` in this directory. It packages the **current** corpus list, cleaning rules, configuration, and scripts into `colab_project.zip`; it does not include books or existing checkpoints.
-2. Open `train_gpt2_colab.ipynb` in Google Colab and choose **Runtime → Change runtime type → A100 GPU**.
-3. Run the notebook cells. Mount Google Drive and upload `colab_project.zip` when prompted.
-4. Inspect the preparation audit. Resolve flagged editions with `cleaning_rules.json`, or explicitly set `ALLOW_PARTIAL_CORPUS=True` to train on accepted books only. An incomplete corpus is rejected by default.
-5. Train and sample text. Rerun the training cell after reconnecting to resume the latest complete checkpoint.
+Inspect the preparation audit before training. Resolve flagged editions with the rules in Cell 3, or explicitly set `ALLOW_PARTIAL_CORPUS=True` in Cell 1 to train on accepted books only. An incomplete corpus is rejected by default. After reconnecting, rerun the cells with the same inputs and `RUN_NAME` to resume the latest complete checkpoint.
 
 Drive stores the project under `MyDrive/GPT2Corpus/project`, the corpus under `MyDrive/GPT2Corpus/corpus`, and experiments under `MyDrive/GPT2Corpus/runs/<RUN_NAME>`. Token arrays are cached on Colab's local disk and can be rebuilt from the same corpus and saved tokenizer. Keep the Drive corpus and run directory to resume. Allow several GB of free space: each default-model checkpoint includes weights and two Adam optimizer moments; the newest two and the best checkpoint are retained.
 
-The notebook and scripts are ready for an A100, but **an A100 training run has not been performed here**. Local verification uses a tiny CPU model and invented books. The two-hour default is a per-session training budget, not a promised completion time. Evaluation, checkpoint writing, and export can run past it. Colab can disconnect earlier, and Drive writes can be slow. See [Colab's runtime and Drive guidance](https://research.google.com/colaboratory/faq.html).
+The script targets an A100, but **an A100 training run has not been performed here**. Local verification uses a tiny CPU model and invented books. The two-hour default is a per-session training budget, not a promised completion time. Evaluation, checkpoint writing, and export can run past it. Colab can disconnect earlier, and Drive writes can be slow. See [Colab's runtime and Drive guidance](https://research.google.com/colaboratory/faq.html).
 
 ## One corpus definition, any number of books
 
-For the single-file Colab workflow, edit the `sources` list in **Cell 2 of `COLAB_ALL_IN_ONE.py`**. For the modular workflow, continue editing **`corpus-list.py`**. Neither the cleaner nor trainer depends on the list's length, order, or particular titles. `corpus_registry.py` is the shared parser/identity logic, and reads the list as Python literals without executing it. Existing URL strings and inline comments continue to work. Optional dictionary entries give you stable grouping without relying on comments:
+Edit the `sources` list in **Cell 2 of `COLAB_ALL_IN_ONE.py`**. Neither the cleaner nor trainer depends on the list's length, order, or particular titles. The generated `corpus_registry.py` module contains the shared parser/identity logic, and reads the list as Python literals without executing it. Existing URL strings and inline comments continue to work. Optional dictionary entries give you stable grouping without relying on comments:
 
 ```python
 sources = [
@@ -62,13 +56,13 @@ sources = [
 
 These are schema examples, not additions to your actual list. Use the same `work_id` for volumes, alternate editions, or related material that must stay in one split. URLs must identify Gutenberg books; IDs are derived from them. Repeated IDs are deduplicated, and conflicting explicit groups are rejected. Existing comments infer volume groups as before; explicit IDs are more reliable. Keep comments/work IDs stable to retain existing split assignments when appending books. Changing a comment-derived identity can change that work's split.
 
-After expanding the list or revising rules in the single-file workflow, rerun Cells 2–3 with your edits, set `REBUILD_CORPUS=True` in Cell 1, and choose a **new `RUN_NAME`**. For the alternate ZIP workflow, rebuild the zip and set `UPLOAD_UPDATED_PROJECT=True` and `REBUILD_CORPUS=True` instead. Cached originals are reused and new books are downloaded. A fresh tokenizer and randomly initialized model are trained for the new experiment. A changed corpus is deliberately incompatible with resuming an old checkpoint.
+After expanding the list or revising rules, choose a **new `RUN_NAME`** and set `REBUILD_CORPUS=True` in Cell 1, then rerun the cells in order with your edits. Cached originals are reused and new books are downloaded. A fresh tokenizer and randomly initialized model are trained for the new experiment. A changed corpus is deliberately incompatible with resuming an old checkpoint.
 
 ## Training behavior
 
 `train_gpt2.py` constructs **`GPT2LMHeadModel(GPT2Config(...))`** with random parameters. A fresh byte-level BPE tokenizer is trained **only on the training books**; no pretrained weights or tokenizer are downloaded. The architecture uses GPT-2's causal language-model head. See [Hugging Face's GPT-2 configuration](https://huggingface.co/docs/transformers/model_doc/gpt2) and [BPE trainer reference](https://huggingface.co/docs/tokenizers/api/trainers).
 
-Edit the settings in **Cell 4** of the single-file version (or `training_config.json` in the modular version) before a new run:
+Edit the settings in **Cell 4** before a new run:
 
 | Setting | Default |
 | --- | --- |
@@ -105,31 +99,13 @@ At optimizer steps **100, 200, 300, …**, `generate_samples()` in `train_gpt2.p
 
 The same prompts and random seeds are reused so you can compare checkpoints. Each continuation uses up to 128 new tokens, temperature 0.8, and top-p 0.95. Generation temporarily uses evaluation mode and restores the training mode and CPU/CUDA random states afterward. Sampling does not change dropout randomness or optimizer updates, but takes additional session time. Very early outputs may be incoherent.
 
-Samples are also appended to **`samples.jsonl`** in the run directory on Drive, with the optimizer step, prompt, continuation, generation settings, and generated token count. Prompts that exceed the available context are shortened from the left and marked in the output. Edit the `sample_*` fields in Cell 4 (or `training_config.json`) to change prompts, cadence, length, seed, temperature, or top-p; `sample_every: 0` disables previews. These observation settings can change on resume without restarting training, and the current settings are saved in `sampling_config.json`.
+Samples are also appended to **`samples.jsonl`** in the run directory on Drive, with the optimizer step, prompt, continuation, generation settings, and generated token count. Prompts that exceed the available context are shortened from the left and marked in the output. Edit the `sample_*` fields in Cell 4 to change prompts, cadence, length, seed, temperature, or top-p; `sample_every: 0` disables previews. These observation settings can change on resume without restarting training, and the current settings are saved in `sampling_config.json`.
 
-## Command-line training
+## Training outputs
 
-Cleaning uses only Python's standard library. Training requires the packages in `requirements-colab.txt`. Install these in an environment with CUDA-enabled PyTorch for an A100. Transformers/Tokenizers are pinned to the API pair used in local tests; Colab's existing compatible PyTorch is retained.
+Cell 5 installs the training dependencies embedded in this file. Transformers/Tokenizers are pinned to the API pair used in local tests; Colab's existing compatible PyTorch is retained. Cell 12 trains or resumes, and Cell 13 generates from the saved model. The session wall-clock budget and `sample_*` preview settings can change between resumes without changing the objective/schedule.
 
-```sh
-python3 -m pip install -r requirements-colab.txt
-
-# Unified preparation + tokenization + random initialization + training:
-python3 train_gpt2.py --prepare --corpus data/corpus --output runs/experiment-001
-
-# Or train an existing audited run:
-python3 train_gpt2.py --corpus data/corpus --output runs/experiment-001
-
-# Later sessions must use the same corpus, config, code, and package versions:
-python3 train_gpt2.py --corpus data/corpus --output runs/experiment-001 --resume
-
-python3 generate.py --model runs/experiment-001/best_model \
-  --prompt "The evening was quiet, and" --max-new-tokens 200
-```
-
-Use a new output directory for the first command if you already ran the second (and vice versa). `--prepare` intentionally cannot be combined with `--resume`. To review preparation settings, run `python3 prepare_corpus.py --help`; all of its existing options remain available separately. `--max-steps` is a **total** schedule cap, not additional steps for each resume. The session wall-clock budget and `sample_*` preview settings can change between resumes without changing the objective/schedule.
-
-Output files:
+Each training run writes these files under `MyDrive/GPT2Corpus/runs/<RUN_NAME>`:
 
 | Path | Purpose |
 | --- | --- |
@@ -150,29 +126,20 @@ Checkpoints from the immediately preceding trainer (before progress sampling was
 
 If the installed versions change in a future Colab image, the script refuses a mismatched resume. `run.json` records the original versions so you can restore a compatible environment. A CUDA out-of-memory error requires lowering `batch_size` in a new experiment; increase `gradient_accumulation` if you want to maintain the nominal effective batch size. No external experiment tracker or model publishing is enabled.
 
-## Start small
+## Local checks
 
-Run the synthetic tests without downloading anything:
+Check syntax and run the synthetic tests without downloading books or mounting Drive:
 
 ```sh
+python3 -m py_compile COLAB_ALL_IN_ONE.py
 python3 -m unittest discover -s tests -v
 ```
 
-Optionally process just one actual book:
-
-```sh
-python3 prepare_corpus.py --limit 1 --output data/trial
-```
-
-Or select particular IDs from the list:
-
-```sh
-python3 prepare_corpus.py --ids 1342 --output data/trial
-```
-
-When ready to process the entire list, run `python3 prepare_corpus.py`. Use `--output /path/to/another/drive/corpus` to choose a different disk. No full-corpus run was performed during development.
+The tests extract the embedded modules into a temporary directory, validate each numbered cell and embedded Python/JSON file, and exercise the source-writing cells with installation/GPU commands mocked. Training integration tests require the dependencies listed in Cell 5 and are skipped when those packages are absent. Run the actual workflow in Colab, one cell at a time.
 
 ## Cleaning behavior
+
+Cells 6–10 create helper modules in the Drive project directory. The optional command-line flags documented below apply to those generated modules; they are no longer separate repository files.
 
 The default is **main narrative**, keeping chapter headings and epigraphs:
 
@@ -217,13 +184,13 @@ Exit code `0` means every requested book was accepted or identified as an exact 
 
 ## Reviewing a difficult edition
 
-Keep only the single edition needed for review:
+After Cells 1–10, these optional shell commands can be run from the generated Drive project directory. To keep only the single edition needed for review:
 
 ```sh
 python3 prepare_corpus.py --ids 1342 --output data/review-one --cache-raw --write-books
 ```
 
-Read its audit and original `data/review-one/raw/1342.txt`. The manifest and `raw/1342.json` contain its `sha256`. Add an entry to `cleaning_rules.json`, using that exact SHA-256. The following is a **schema example, not a tested rule for a real book**:
+Read its audit and original `data/review-one/raw/1342.txt`. The manifest and `raw/1342.json` contain its `sha256`. Add an entry to the cleaning rules in **Cell 3**, using that exact SHA-256, then rerun Cell 3 to write the updated rules to Drive. The following is a **schema example, not a tested rule for a real book**:
 
 ```json
 {
@@ -265,7 +232,7 @@ Raw originals are retained only with `--cache-raw`. The manifest records removal
 
 ## Validation performed
 
-Tests use tiny invented texts and mocked HTTP responses. With training dependencies installed, they also train a tiny randomly initialized GPT-2, resume it, compare its final weights exactly against an uninterrupted CPU run, and generate text from its export. They also verify the 100-update sample cadence, context limits, fixed-seed previews, RNG/mode restoration, and identical CPU training weights with and without previews. They check train-only tokenizer fitting, Unicode round trips, complete token-target coverage, EOS/padding labels, split leakage rejection, tampered chunks, portable run pointers, and resume configuration checks. They cover source-list parsing without execution, wrapper validation, TOC/narrative boundaries, prologues, footnotes, Unicode and verse preservation, literal rule checks, cache integrity, HTTP fallback/retry behavior, exact deduplication, volume grouping, lossless chunking, and an end-to-end offline run including review and download failures.
+Tests validate the complete all-in-one file, every numbered cell, all embedded Python modules, and both JSON configurations. They execute the file-writing cells and preparation/training/generation command cells in isolation with external commands mocked. Pipeline tests use the extracted code, tiny invented texts, and mocked HTTP responses. With training dependencies installed, they train a tiny randomly initialized GPT-2, resume it, compare its final weights exactly against an uninterrupted CPU run, and generate text from its export. They also verify the 100-update sample cadence, context limits, fixed-seed previews, RNG/mode restoration, and identical CPU training weights with and without previews. They check train-only tokenizer fitting, Unicode round trips, complete token-target coverage, EOS/padding labels, split leakage rejection, tampered chunks, portable run pointers, and resume configuration checks. They cover source-list parsing without execution, wrapper validation, TOC/narrative boundaries, prologues, footnotes, Unicode and verse preservation, literal rule checks, cache integrity, HTTP fallback/retry behavior, exact deduplication, volume grouping, lossless chunking, and an end-to-end offline run including review and download failures.
 
 The full corpus has **not** been downloaded or manually audited. No claim of edition-by-edition completeness is made.
 

@@ -37,7 +37,7 @@ settings can change on resume. Preserve the rest of the source in Cells 6–10.
 
 To resume in a fresh Colab runtime, rerun the cells with the same RUN_NAME and
 training inputs. Cell 12 detects the existing run and resumes automatically.
-The original notebook and modular scripts are optional alternative entry points.
+This file is the sole application source; its cells create all required modules.
 """
 
 # ============================================================================
