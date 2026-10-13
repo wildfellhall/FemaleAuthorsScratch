@@ -1,5 +1,7 @@
 # FemaleAuthorsScratch
 
+**Google Colab copy/paste file: [`COLAB_ALL_IN_ONE.py`](COLAB_ALL_IN_ONE.py).** It contains everything in 13 numbered cells; no ZIP or separate uploads are needed.
+
 FemaleAuthorsScratch trains a generative text model from scratch on a growing corpus of works by female authors. The default configuration has **111,008,256 trainable parameters (approximately 111M)** when the tokenizer reaches its 32,768-token vocabulary target. Both the GPT-2 language model and its byte-level BPE tokenizer are trained from scratch.
 
 | Configuration | Default |
@@ -23,7 +25,16 @@ The output language-model head shares its weights with the token embeddings, so 
 
 **Storage defaults:** each download is held in memory and processed individually. Raw books and separate cleaned-book copies are **not saved** unless requested. The final JSONL corpus still requires disk space. Each invocation creates a new output run; previous runs are retained.
 
-## Start in Google Colab
+## Start in Google Colab — one copy/paste file
+
+1. Open **[`COLAB_ALL_IN_ONE.py`](COLAB_ALL_IN_ONE.py)**. Create a Google Colab notebook and select **Runtime → Change runtime type → A100 GPU**.
+2. Copy each numbered `CELL` section into its own code cell, including the comment heading, and run them in order. The format follows the labeled sections in the Poetry50M and FeminineClassicsFinetunedSLM scripts.
+3. Edit the corpus in **Cell 2**, cleaning rules in **Cell 3**, and model/training/sample settings in **Cell 4**. Set your run name and session options in **Cell 1**.
+4. **Cell 11** prepares the corpus and shows audit findings; **Cell 12** trains or resumes and prints samples every 100 optimizer updates; **Cell 13** generates text from the saved model.
+
+The existing source files are embedded verbatim. Their cells automatically write the modules and configuration into the Drive project directory, preserving the original imports, command-line behavior, and checkpoint fingerprints. You only copy from this one file. Run the complete source-writing cells, keeping their surrounding raw-string quotes and `write_text` calls. These cells write their displayed source/configuration into Drive, so carry over any prior edits made directly to the Drive copies before rerunning them. Existing source modules and the notebook remain available as alternative entry points.
+
+## Alternate: existing notebook with ZIP upload
 
 1. Run `python3 make_colab_bundle.py` in this directory. It packages the **current** corpus list, cleaning rules, configuration, and scripts into `colab_project.zip`; it does not include books or existing checkpoints.
 2. Open `train_gpt2_colab.ipynb` in Google Colab and choose **Runtime → Change runtime type → A100 GPU**.
@@ -37,7 +48,7 @@ The notebook and scripts are ready for an A100, but **an A100 training run has n
 
 ## One corpus definition, any number of books
 
-Continue editing **`corpus-list.py`**. Neither the cleaner nor trainer depends on its length, order, or particular titles. `corpus_registry.py` is the shared parser/identity logic, and reads the list as Python literals without executing it. Existing URL strings and inline comments continue to work. Optional dictionary entries give you stable grouping without relying on comments:
+For the single-file Colab workflow, edit the `sources` list in **Cell 2 of `COLAB_ALL_IN_ONE.py`**. For the modular workflow, continue editing **`corpus-list.py`**. Neither the cleaner nor trainer depends on the list's length, order, or particular titles. `corpus_registry.py` is the shared parser/identity logic, and reads the list as Python literals without executing it. Existing URL strings and inline comments continue to work. Optional dictionary entries give you stable grouping without relying on comments:
 
 ```python
 sources = [
@@ -51,13 +62,13 @@ sources = [
 
 These are schema examples, not additions to your actual list. Use the same `work_id` for volumes, alternate editions, or related material that must stay in one split. URLs must identify Gutenberg books; IDs are derived from them. Repeated IDs are deduplicated, and conflicting explicit groups are rejected. Existing comments infer volume groups as before; explicit IDs are more reliable. Keep comments/work IDs stable to retain existing split assignments when appending books. Changing a comment-derived identity can change that work's split.
 
-After expanding the list or revising rules: rebuild the zip, set `UPLOAD_UPDATED_PROJECT=True` and `REBUILD_CORPUS=True` in Colab, and choose a **new `RUN_NAME`**. Cached originals are reused and new books are downloaded. A fresh tokenizer and randomly initialized model are trained for the new experiment. A changed corpus is deliberately incompatible with resuming an old checkpoint.
+After expanding the list or revising rules in the single-file workflow, rerun Cells 2–3 with your edits, set `REBUILD_CORPUS=True` in Cell 1, and choose a **new `RUN_NAME`**. For the alternate ZIP workflow, rebuild the zip and set `UPLOAD_UPDATED_PROJECT=True` and `REBUILD_CORPUS=True` instead. Cached originals are reused and new books are downloaded. A fresh tokenizer and randomly initialized model are trained for the new experiment. A changed corpus is deliberately incompatible with resuming an old checkpoint.
 
 ## Training behavior
 
 `train_gpt2.py` constructs **`GPT2LMHeadModel(GPT2Config(...))`** with random parameters. A fresh byte-level BPE tokenizer is trained **only on the training books**; no pretrained weights or tokenizer are downloaded. The architecture uses GPT-2's causal language-model head. See [Hugging Face's GPT-2 configuration](https://huggingface.co/docs/transformers/model_doc/gpt2) and [BPE trainer reference](https://huggingface.co/docs/tokenizers/api/trainers).
 
-Edit `training_config.json` before a new run:
+Edit the settings in **Cell 4** of the single-file version (or `training_config.json` in the modular version) before a new run:
 
 | Setting | Default |
 | --- | --- |
@@ -94,7 +105,7 @@ At optimizer steps **100, 200, 300, …**, `generate_samples()` in `train_gpt2.p
 
 The same prompts and random seeds are reused so you can compare checkpoints. Each continuation uses up to 128 new tokens, temperature 0.8, and top-p 0.95. Generation temporarily uses evaluation mode and restores the training mode and CPU/CUDA random states afterward. Sampling does not change dropout randomness or optimizer updates, but takes additional session time. Very early outputs may be incoherent.
 
-Samples are also appended to **`samples.jsonl`** in the run directory on Drive, with the optimizer step, prompt, continuation, generation settings, and generated token count. Prompts that exceed the available context are shortened from the left and marked in the output. Edit the `sample_*` fields in `training_config.json` to change prompts, cadence, length, seed, temperature, or top-p; `sample_every: 0` disables previews. These observation settings can change on resume without restarting training, and the current settings are saved in `sampling_config.json`.
+Samples are also appended to **`samples.jsonl`** in the run directory on Drive, with the optimizer step, prompt, continuation, generation settings, and generated token count. Prompts that exceed the available context are shortened from the left and marked in the output. Edit the `sample_*` fields in Cell 4 (or `training_config.json`) to change prompts, cadence, length, seed, temperature, or top-p; `sample_every: 0` disables previews. These observation settings can change on resume without restarting training, and the current settings are saved in `sampling_config.json`.
 
 ## Command-line training
 
