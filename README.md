@@ -1,5 +1,23 @@
 # FemaleAuthorsScratch
 
+FemaleAuthorsScratch trains a generative text model from scratch on a growing corpus of works by female authors. The default configuration has **111,008,256 trainable parameters (approximately 111M)** when the tokenizer reaches its 32,768-token vocabulary target. Both the GPT-2 language model and its byte-level BPE tokenizer are trained from scratch.
+
+| Configuration | Default |
+| --- | --- |
+| Model | `GPT2LMHeadModel` with randomly initialized weights |
+| Transformer layers | 12 |
+| Attention heads | 12 per layer; 64 dimensions per head |
+| Hidden / feed-forward width | 768 / 3,072 |
+| Context window | 1,024 tokens |
+| Vocabulary | Up to 32,768 tokens, including special tokens |
+| Dropout | 0.1 for embeddings, attention, and residual connections |
+| Effective batch | Up to 64 windows per optimizer update: microbatch 8 × accumulation 8 |
+| Training hardware / precision | One A100 GPU; BF16 mixed precision with TF32 enabled |
+| Optimizer / schedule | AdamW at 3e-4; 3% warmup, cosine decay, 3 epochs |
+| Session budget | Two hours of training per session, with resumable checkpoints |
+
+The output language-model head shares its weights with the token embeddings, so those parameters are counted once. With the default layer widths and context length, the exact count is **85,842,432 + 768 × actual vocabulary size**. A smaller learned vocabulary yields fewer parameters. Adding books changes the training data and step count; model size changes only when the learned vocabulary size or architecture changes. Defaults are defined in [`training_config.json`](training_config.json), and [`train_gpt2.py`](train_gpt2.py) reports the actual parameter count before training.
+
 `prepare_corpus.py` reads the current entries in `corpus-list.py`, downloads their plain-text editions, removes digital boilerplate and identifiable non-narrative material, and writes model-training JSONL. Requires **Python 3.10+**, with no third-party dependencies. The input Python file is parsed, never executed.
 
 **Storage defaults:** each download is held in memory and processed individually. Raw books and separate cleaned-book copies are **not saved** unless requested. The final JSONL corpus still requires disk space. Each invocation creates a new output run; previous runs are retained.
