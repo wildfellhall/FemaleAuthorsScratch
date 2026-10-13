@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import importlib.metadata
 import json
 import math
@@ -20,6 +20,11 @@ from prepare_corpus import sha256, write_json
 from training_data import (DATA_VERSION, SPLITS, TokenWindows, collate_windows,
                            file_sha256, inspect_corpus, resolve_run,
                            tokenize_corpus, train_tokenizer)
+
+
+# The preceding trainer differs only in progress sampling and its configuration.
+# Allow its checkpoints after checking every training/data/environment setting.
+PRE_SAMPLE_TRAINER_SHA256 = "e6bbb7324298a7187b8b9b5d605a642f4296a31fbb078d52e0750f64e881004a"
 
 
 @dataclass
@@ -45,6 +50,16 @@ class TrainConfig:
     keep_checkpoints: int = 2  # best checkpoint is also retained
     gradient_checkpointing: bool = True
     seed: int = 42
+    sample_every: int = 100  # optimizer updates, not accumulation microbatches; 0 disables
+    sample_max_new_tokens: int = 128
+    sample_temperature: float = 0.8
+    sample_top_p: float = 0.95
+    sample_seed: int = 1234
+    sample_prompts: list[str] = field(default_factory=lambda: [
+        "The evening was quiet, and",
+        "She opened the letter and",
+        '\"I never expected,\" she said,',
+    ])
 
     def validate(self):
         integers = ("vocab_size", "min_frequency", "context_length", "n_layer", "n_head", "n_embd", "batch_size", "gradient_accumulation", "epochs", "eval_every", "save_every", "log_every", "keep_checkpoints")
@@ -62,6 +77,14 @@ class TrainConfig:
             raise ValueError("Invalid optimizer configuration.")
         if type(self.gradient_checkpointing) is not bool:
             raise ValueError("gradient_checkpointing must be boolean.")
+        if type(self.sample_every) is not int or self.sample_every < 0 or type(self.sample_seed) is not int or self.sample_seed < 0:
+            raise ValueError("sample_every and sample_seed must be nonnegative integers.")
+        if type(self.sample_max_new_tokens) is not int or self.sample_max_new_tokens < 1:
+            raise ValueError("sample_max_new_tokens must be a positive integer.")
+        if not math.isfinite(self.sample_temperature) or self.sample_temperature <= 0 or not 0 < self.sample_top_p <= 1:
+            raise ValueError("sample_temperature must be finite and positive; sample_top_p must be in (0, 1].")
+        if not isinstance(self.sample_prompts, list) or not self.sample_prompts or any(not isinstance(prompt, str) or not prompt.strip() for prompt in self.sample_prompts):
+            raise ValueError("sample_prompts must be a nonempty list of nonempty strings.")
 
 
 def make_model(config: TrainConfig, tokenizer):
@@ -104,6 +127,69 @@ def evaluate(model, dataset, config, tokenizer, device):
             targets += count
     loss = total_nll / targets
     return {"loss": loss, "perplexity": math.exp(loss) if loss < 700 else None, "target_tokens": targets}
+
+
+def generate_samples(model, tokenizer, config: TrainConfig, device, step: int, output: Path):
+    """Print/save comparable prose continuations without perturbing training RNG.
+
+    Generation uses the current weights, evaluation mode, and no gradients. The
+    caller's model mode and CPU/CUDA random states are restored even on failure.
+    """
+    import torch
+
+    was_training = model.training
+    samples = []
+    new_tokens = min(config.sample_max_new_tokens, model.config.n_positions - 1)
+    prompt_limit = model.config.n_positions - new_tokens
+    # manual_seed seeds all CUDA generators as well as CPU, so fork all of them.
+    cuda_devices = list(range(torch.cuda.device_count()))
+    try:
+        model.eval()
+        with torch.random.fork_rng(devices=cuda_devices), torch.inference_mode():
+            for index, prompt in enumerate(config.sample_prompts):
+                torch.manual_seed(config.sample_seed + index)
+                prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+                truncated = len(prompt_ids) > prompt_limit
+                prompt_ids = prompt_ids[-prompt_limit:] or [tokenizer.bos_token_id]
+                input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+                with amp_context(device):
+                    generated = model.generate(
+                        input_ids=input_ids, attention_mask=torch.ones_like(input_ids),
+                        max_new_tokens=new_tokens, do_sample=True,
+                        temperature=config.sample_temperature, top_p=config.sample_top_p,
+                        top_k=0, use_cache=True, pad_token_id=tokenizer.pad_token_id,
+                        eos_token_id=tokenizer.eos_token_id,
+                        bad_words_ids=[[tokenizer.pad_token_id]],
+                    )
+                continuation_ids = generated[0, len(prompt_ids):].tolist()
+                samples.append({
+                    "prompt": prompt, "input_text": tokenizer.decode(prompt_ids, skip_special_tokens=True),
+                    "prompt_truncated": truncated,
+                    "continuation": tokenizer.decode(continuation_ids, skip_special_tokens=True),
+                    "generated_tokens": len(continuation_ids), "seed": config.sample_seed + index,
+                })
+    finally:
+        model.train(was_training)
+    record = {"step": step, "max_new_tokens": new_tokens,
+              "temperature": config.sample_temperature, "top_p": config.sample_top_p,
+              "top_k": 0, "samples": samples}
+    with (output / "samples.jsonl").open("a", encoding="utf-8") as target:
+        target.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+    print(f"\nSamples at optimizer step {step}", flush=True)
+    for index, sample in enumerate(samples, 1):
+        notice = " (prompt shortened to fit context)" if sample["prompt_truncated"] else ""
+        print(f"\nPrompt {index}{notice}: {sample['input_text']}\nContinuation: {sample['continuation']}", flush=True)
+    return record
+
+
+def resume_recipe_matches(saved: dict, current: dict) -> bool:
+    """Accept the verified pre-sampling trainer without relaxing other guards."""
+    previous = dict(saved)
+    implementation = dict(previous.get("implementation", {}))
+    if implementation.get("train_gpt2.py") == PRE_SAMPLE_TRAINER_SHA256:
+        implementation["train_gpt2.py"] = current["implementation"]["train_gpt2.py"]
+    previous["implementation"] = implementation
+    return previous == current
 
 
 def checkpoint_paths(output):
@@ -196,7 +282,10 @@ def train(args, config):
 
     run = resolve_run(args.corpus)
     corpus = inspect_corpus(run, args.allow_partial_corpus)
-    recipe = {"config": asdict(config), "data_version": DATA_VERSION, "corpus": corpus["fingerprint"],
+    settings = asdict(config)
+    sampling_settings = {key: value for key, value in settings.items() if key.startswith("sample_")}
+    training_settings = {key: value for key, value in settings.items() if not key.startswith("sample_")}
+    recipe = {"config": training_settings, "data_version": DATA_VERSION, "corpus": corpus["fingerprint"],
               "precision": "bf16" if device.type == "cuda" else "fp32",
               "implementation": {name: file_sha256(Path(__file__).with_name(name)) for name in ("train_gpt2.py", "training_data.py")},
               "versions": {name: importlib.metadata.version(name) for name in ("torch", "transformers", "tokenizers", "numpy")}}
@@ -207,7 +296,7 @@ def train(args, config):
         if not args.resume:
             raise CorpusError("Output already contains a run. Use --resume or a new --output directory.")
         saved_run = json.loads(run_file.read_text())
-        if saved_run["recipe"] != recipe:
+        if not resume_recipe_matches(saved_run["recipe"], recipe):
             raise CorpusError("Corpus, settings, precision or library versions changed. Use a new output directory; resume cannot change the training objective or schedule.")
         tokenizer = PreTrainedTokenizerFast.from_pretrained(output / "tokenizer", local_files_only=True)
         if {p.name: file_sha256(p) for p in (output / "tokenizer").iterdir() if p.is_file()} != saved_run["tokenizer_files"]:
@@ -234,6 +323,7 @@ def train(args, config):
             if source.is_file() and file_sha256(source) == cleaning_report[checksum]:
                 shutil.copy2(source, provenance / name)
         write_json(run_file, saved_run)
+    write_json(output / "sampling_config.json", sampling_settings)
     identity = saved_run["identity"]
     token_dir = args.work_dir / identity
     marker = token_dir / "complete.json"
@@ -323,6 +413,8 @@ def train(args, config):
             state["next_batch"] = batch_end
             if batch_end == batches_per_epoch:
                 state["epoch"], state["next_batch"] = epoch + 1, 0
+            if config.sample_every and state["step"] % config.sample_every == 0:
+                generate_samples(model, tokenizer, config, device, state["step"], output)
             elapsed = time.monotonic() - started
             if state["step"] == 1 or state["step"] % config.log_every == 0:
                 log_metrics(output, {"step": state["step"], "train_loss": nll / total_targets, "learning_rate": scheduler.get_last_lr()[0], "tokens_seen": state["tokens_seen"], "session_seconds": elapsed, "session_tokens_per_second": session_tokens / max(elapsed, 1e-9)})

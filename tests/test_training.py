@@ -15,7 +15,8 @@ from unittest.mock import patch
 import corpus_registry
 import prepare_corpus as corpus
 import training_data as data
-from train_gpt2 import TrainConfig, checkpoint_paths, parse_args, train
+from train_gpt2 import (PRE_SAMPLE_TRAINER_SHA256, TrainConfig, checkpoint_paths,
+                        generate_samples, make_model, parse_args, resume_recipe_matches, train)
 from test_prepare_corpus import book_bytes, NARRATIVE
 
 HAS_TRAINING = all(importlib.util.find_spec(name) for name in ("torch", "transformers", "tokenizers", "numpy"))
@@ -122,7 +123,8 @@ class TrainingTests(CorpusFixture, unittest.TestCase):
         return TrainConfig(vocab_size=300, context_length=32, n_layer=1, n_head=2, n_embd=16,
                            batch_size=2, gradient_accumulation=2, epochs=1, max_steps=4,
                            eval_every=2, save_every=2, log_every=1, dropout=0.1,
-                           gradient_checkpointing=True)
+                           gradient_checkpointing=True, sample_every=2,
+                           sample_max_new_tokens=4, sample_prompts=['A'])
 
     def arguments(self, name):
         return parse_args(['--corpus', str(self.run), '--output', str(self.root / name),
@@ -152,7 +154,7 @@ class TrainingTests(CorpusFixture, unittest.TestCase):
         from safetensors.torch import load_file
         cfg = self.config()
         with contextlib.redirect_stdout(io.StringIO()):
-            full = train(self.arguments('full'), cfg)
+            full = train(self.arguments('full'), replace(cfg, sample_every=0))
             args = self.arguments('resumed')
             args.max_seconds = 1e-9  # stop at a safe optimizer boundary
             partial = train(args, cfg)
@@ -162,6 +164,9 @@ class TrainingTests(CorpusFixture, unittest.TestCase):
             args.resume, args.max_seconds = True, 0
             completed = train(args, cfg)
         self.assertTrue(completed['complete'])
+        samples = [json.loads(line) for line in (self.root / 'resumed' / 'samples.jsonl').read_text().splitlines()]
+        self.assertEqual([row['step'] for row in samples], [2, 4])
+        self.assertFalse((self.root / 'full' / 'samples.jsonl').exists())
         self.assertEqual(full['tokens_seen'], completed['tokens_seen'])
         a = load_file(str(self.root / 'full' / 'checkpoint-4' / 'model.safetensors'))
         b = load_file(str(self.root / 'resumed' / 'checkpoint-4' / 'model.safetensors'))
@@ -173,6 +178,90 @@ class TrainingTests(CorpusFixture, unittest.TestCase):
         self.assertTrue(result.stdout.strip())
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaisesRegex(corpus.CorpusError, 'settings'):
             train(args, replace(cfg, learning_rate=.01))
+
+    def test_samples_preserve_rng_mode_cache_and_repeat_with_fixed_seed(self):
+        import torch
+        cfg = self.config()
+        tokenizer = data.train_tokenizer(self.run, self.root / 'tok', 300, 2)
+        model = make_model(cfg, tokenizer)
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={'use_reentrant': False})
+        device = torch.device('cpu')
+        model.train()
+        before = torch.get_rng_state().clone()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            first = generate_samples(model, tokenizer, cfg, device, 100, self.root)
+            second = generate_samples(model, tokenizer, cfg, device, 200, self.root)
+        self.assertEqual(first['samples'], second['samples'])
+        self.assertIn('Samples at optimizer step 100', output.getvalue())
+        self.assertTrue(torch.equal(before, torch.get_rng_state()))
+        self.assertTrue(model.training)
+        self.assertTrue(model.is_gradient_checkpointing)
+        self.assertFalse(model.config.use_cache)
+        self.assertFalse(model.generation_config.use_cache)
+        self.assertTrue(all(parameter.grad is None for parameter in model.parameters()))
+        model.eval()
+        with contextlib.redirect_stdout(io.StringIO()):
+            generate_samples(model, tokenizer, cfg, device, 300, self.root)
+        self.assertFalse(model.training)
+
+        def fail(**kwargs):
+            torch.rand(10)
+            raise RuntimeError('deliberate failure')
+        model.train()
+        with patch.object(model, 'generate', side_effect=fail), self.assertRaisesRegex(RuntimeError, 'deliberate'):
+            generate_samples(model, tokenizer, cfg, device, 400, self.root)
+        self.assertTrue(model.training)
+        self.assertTrue(torch.equal(before, torch.get_rng_state()))
+
+    def test_samples_shorten_long_prompts_to_fit_context(self):
+        import torch
+        cfg = replace(self.config(), sample_prompts=['A very long prompt. ' * 100], sample_max_new_tokens=5)
+        tokenizer = data.train_tokenizer(self.run, self.root / 'tok', 300, 2)
+        model = make_model(cfg, tokenizer)
+        with patch.object(model, 'generate', wraps=model.generate) as generate, contextlib.redirect_stdout(io.StringIO()):
+            record = generate_samples(model, tokenizer, cfg, torch.device('cpu'), 100, self.root)
+        call = generate.call_args.kwargs
+        self.assertLessEqual(call['input_ids'].shape[1] + call['max_new_tokens'], cfg.context_length)
+        self.assertTrue(call['use_cache'])
+        self.assertTrue(record['samples'][0]['prompt_truncated'])
+        self.assertLessEqual(record['samples'][0]['generated_tokens'], 5)
+
+    def test_default_sample_cadence_is_100_optimizer_updates(self):
+        self.assertEqual(TrainConfig().sample_every, 100)
+        cfg = replace(self.config(), context_length=8, n_embd=8, batch_size=1,
+                      gradient_accumulation=2, epochs=10, max_steps=101,
+                      sample_every=100, sample_max_new_tokens=3,
+                      eval_every=1000, save_every=1000, log_every=1000)
+        with contextlib.redirect_stdout(io.StringIO()):
+            train(self.arguments('cadence'), cfg)
+        samples = [json.loads(line) for line in (self.root / 'cadence' / 'samples.jsonl').read_text().splitlines()]
+        self.assertEqual([row['step'] for row in samples], [100])
+
+    def test_sample_settings_can_change_on_resume(self):
+        cfg = self.config()
+        args = self.arguments('settings')
+        args.max_seconds = 1e-9
+        with contextlib.redirect_stdout(io.StringIO()):
+            train(args, cfg)
+            args.resume, args.max_seconds = True, 0
+            train(args, replace(cfg, sample_prompts=['She'], sample_every=1))
+        samples = [json.loads(line) for line in (args.output / 'samples.jsonl').read_text().splitlines()]
+        self.assertEqual([row['step'] for row in samples], [2, 3, 4])
+        self.assertEqual(samples[0]['samples'][0]['prompt'], 'She')
+
+    def test_known_legacy_trainer_resumes_but_other_changes_do_not(self):
+        import copy
+        current = {'config': {'seed': 42}, 'corpus': 'unchanged', 'implementation': {
+            'train_gpt2.py': 'current', 'training_data.py': 'same-data-code'}}
+        old = copy.deepcopy(current)
+        old['implementation']['train_gpt2.py'] = PRE_SAMPLE_TRAINER_SHA256
+        self.assertTrue(resume_recipe_matches(old, current))
+        for location, name, value in [('config', 'seed', 3), ('implementation', 'training_data.py', 'changed'), ('implementation', 'train_gpt2.py', 'unknown-code')]:
+            altered = copy.deepcopy(old)
+            altered[location][name] = value
+            self.assertFalse(resume_recipe_matches(altered, current))
+        old['corpus'] = 'different-corpus'
+        self.assertFalse(resume_recipe_matches(old, current))
 
     def test_complete_epoch_includes_final_accumulation(self):
         cfg = replace(self.config(), max_steps=0, batch_size=3, gradient_accumulation=3)
@@ -204,6 +293,9 @@ class TrainingTests(CorpusFixture, unittest.TestCase):
     def test_nonfinite_config_rejected(self):
         with self.assertRaises(ValueError):
             replace(self.config(), learning_rate=float('nan')).validate()
+        for changes in ({'sample_every': -1}, {'sample_every': True}, {'sample_prompts': []}, {'sample_prompts': ['']}, {'sample_max_new_tokens': 0}, {'sample_temperature': float('nan')}, {'sample_top_p': 1.1}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                replace(self.config(), **changes).validate()
 
 
 if __name__ == '__main__':

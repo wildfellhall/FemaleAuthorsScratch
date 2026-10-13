@@ -19,5 +19,15 @@
   "log_every": 10,
   "keep_checkpoints": 2,
   "gradient_checkpointing": true,
-  "seed": 42
+  "seed": 42,
+  "sample_every": 100,
+  "sample_max_new_tokens": 128,
+  "sample_temperature": 0.8,
+  "sample_top_p": 0.95,
+  "sample_seed": 1234,
+  "sample_prompts": [
+    "The evening was quiet, and",
+    "She opened the letter and",
+    "\"I never expected,\" she said,"
+  ]
 }

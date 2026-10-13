@@ -15,6 +15,7 @@ FemaleAuthorsScratch trains a generative text model from scratch on a growing co
 | Training hardware / precision | One A100 GPU; BF16 mixed precision with TF32 enabled |
 | Optimizer / schedule | AdamW at 3e-4; 3% warmup, cosine decay, 3 epochs |
 | Session budget | Two hours of training per session, with resumable checkpoints |
+| Progress samples | Three fixed prompts every 100 optimizer updates; printed and saved |
 
 The output language-model head shares its weights with the token embeddings, so those parameters are counted once. With the default layer widths and context length, the exact count is **85,842,432 + 768 × actual vocabulary size**. A smaller learned vocabulary yields fewer parameters. Adding books changes the training data and step count; model size changes only when the learned vocabulary size or architecture changes. Defaults are defined in [`training_config.json`](training_config.json), and [`train_gpt2.py`](train_gpt2.py) reports the actual parameter count before training.
 
@@ -70,6 +71,7 @@ Edit `training_config.json` before a new run:
 | Precision | BF16 autocast on CUDA, TF32 matrix multiplication |
 | Memory / attention | Gradient checkpointing and PyTorch SDPA |
 | Checkpoints / validation | Every 100 / 200 updates; also validate and save at epoch/session end |
+| Progress samples | Every 100 optimizer updates; three prompts, up to 128 new tokens each |
 | Session budget | 7,200 seconds; `--max-seconds 0` disables it |
 
 This is GPT-2 small's transformer shape, with a corpus-specific vocabulary (roughly 111M parameters at the full default vocabulary, rather than the original vocabulary's parameter count). The program prints the actual parameter and token counts, planned optimizer steps, training loss, validation loss/perplexity, and observed tokens per second. BF16 and TF32 require suitable hardware; this script checks CUDA/BF16 support. It also supports `--device cpu` for tiny development tests. The mixed-precision behavior follows [PyTorch's autocast API](https://docs.pytorch.org/docs/stable/amp.html).
@@ -81,6 +83,18 @@ Every book starts with a BOS token and ends with EOS. Token windows stay within 
 Training needs nonempty train and validation sets; tiny trial lists may not produce both under the stable hash split. Add works or explicitly choose a different preparation seed/fraction for that experiment. Do not split samples from the same book into training and validation. Test can be empty; that is reported as `null` instead of inventing a score. Otherwise it is evaluated on the best validation checkpoint only after the full schedule ends.
 
 Three epochs is an initial experiment, not a quality guarantee. A small literary corpus may overfit this architecture well before it learns fluent prose. Watch validation loss; consider a smaller configuration (for example 6 layers, width 384, 6 heads) as a separate experiment. Increasing epochs cannot substitute for more varied data. Changing configuration or the total schedule requires a new run directory.
+
+## Watch training progress
+
+At optimizer steps **100, 200, 300, …**, `generate_samples()` in `train_gpt2.py` prints continuations from the current training weights directly in the Colab cell output. One optimizer step includes all configured gradient-accumulation microbatches. The default prompts are:
+
+- `The evening was quiet, and`
+- `She opened the letter and`
+- `"I never expected," she said,`
+
+The same prompts and random seeds are reused so you can compare checkpoints. Each continuation uses up to 128 new tokens, temperature 0.8, and top-p 0.95. Generation temporarily uses evaluation mode and restores the training mode and CPU/CUDA random states afterward. Sampling does not change dropout randomness or optimizer updates, but takes additional session time. Very early outputs may be incoherent.
+
+Samples are also appended to **`samples.jsonl`** in the run directory on Drive, with the optimizer step, prompt, continuation, generation settings, and generated token count. Prompts that exceed the available context are shortened from the left and marked in the output. Edit the `sample_*` fields in `training_config.json` to change prompts, cadence, length, seed, temperature, or top-p; `sample_every: 0` disables previews. These observation settings can change on resume without restarting training, and the current settings are saved in `sampling_config.json`.
 
 ## Command-line training
 
@@ -102,7 +116,7 @@ python3 generate.py --model runs/experiment-001/best_model \
   --prompt "The evening was quiet, and" --max-new-tokens 200
 ```
 
-Use a new output directory for the first command if you already ran the second (and vice versa). `--prepare` intentionally cannot be combined with `--resume`. To review preparation settings, run `python3 prepare_corpus.py --help`; all of its existing options remain available separately. `--max-steps` is a **total** schedule cap, not additional steps for each resume. Only the session wall-clock budget can change between resumes without changing the objective/schedule.
+Use a new output directory for the first command if you already ran the second (and vice versa). `--prepare` intentionally cannot be combined with `--resume`. To review preparation settings, run `python3 prepare_corpus.py --help`; all of its existing options remain available separately. `--max-steps` is a **total** schedule cap, not additional steps for each resume. The session wall-clock budget and `sample_*` preview settings can change between resumes without changing the objective/schedule.
 
 Output files:
 
@@ -113,11 +127,15 @@ Output files:
 | `provenance/` | Cleaning report/manifest, source/rules snapshots, implementation |
 | `training_plan.json` | Actual token, book, parameter, window, and step counts |
 | `metrics.jsonl` | Training and validation measurements |
+| `samples.jsonl` | Generated continuations at each sampling step |
+| `sampling_config.json` | Preview settings used in the latest session |
 | `checkpoint-<step>/` | Model, optimizer, scheduler, RNG and epoch cursor; `complete.json` marks a finished write |
 | `best_model/` | Self-contained inference model and tokenizer, exported on graceful completion/session stop |
 | `result.json` | Completion flag, best validation step, budget status, final test metrics |
 
 Checkpoints are written into a temporary directory and marked complete before becoming resumable. Incomplete writes are ignored. Sudden runtime loss or manual interruption can lose updates since the last completed checkpoint; rerunning resumes from that checkpoint. The best model uses validation loss, while resume always uses the latest completed optimizer state. Resume restores Python/NumPy/PyTorch RNG state and the shuffle cursor. GPU kernels can be nondeterministic; bitwise A100 equivalence is not promised. Only resume your own checkpoints: optimizer/RNG files use PyTorch pickle serialization. `best_model` uses safetensors.
+
+Checkpoints from the immediately preceding trainer (before progress sampling was added) are recognized and can resume with this version. All training settings, corpus/tokenizer checksums, data code, and package versions must still match; arbitrary code changes remain incompatible.
 
 If the installed versions change in a future Colab image, the script refuses a mismatched resume. `run.json` records the original versions so you can restore a compatible environment. A CUDA out-of-memory error requires lowering `batch_size` in a new experiment; increase `gradient_accumulation` if you want to maintain the nominal effective batch size. No external experiment tracker or model publishing is enabled.
 
@@ -236,13 +254,11 @@ Raw originals are retained only with `--cache-raw`. The manifest records removal
 
 ## Validation performed
 
-Tests use tiny invented texts and mocked HTTP responses. With training dependencies installed, they also train a tiny randomly initialized GPT-2, resume it, compare its final weights exactly against an uninterrupted CPU run, and generate text from its export. They check train-only tokenizer fitting, Unicode round trips, complete token-target coverage, EOS/padding labels, split leakage rejection, tampered chunks, portable run pointers, and resume configuration checks. They cover source-list parsing without execution, wrapper validation, TOC/narrative boundaries, prologues, footnotes, Unicode and verse preservation, literal rule checks, cache integrity, HTTP fallback/retry behavior, exact deduplication, volume grouping, lossless chunking, and an end-to-end offline run including review and download failures.
+Tests use tiny invented texts and mocked HTTP responses. With training dependencies installed, they also train a tiny randomly initialized GPT-2, resume it, compare its final weights exactly against an uninterrupted CPU run, and generate text from its export. They also verify the 100-update sample cadence, context limits, fixed-seed previews, RNG/mode restoration, and identical CPU training weights with and without previews. They check train-only tokenizer fitting, Unicode round trips, complete token-target coverage, EOS/padding labels, split leakage rejection, tampered chunks, portable run pointers, and resume configuration checks. They cover source-list parsing without execution, wrapper validation, TOC/narrative boundaries, prologues, footnotes, Unicode and verse preservation, literal rule checks, cache integrity, HTTP fallback/retry behavior, exact deduplication, volume grouping, lossless chunking, and an end-to-end offline run including review and download failures.
 
 The full corpus has **not** been downloaded or manually audited. No claim of edition-by-edition completeness is made.
 
 ## Earlier repository notes
-
-The existing `main.py` is an earlier Colab draft. Use `train_gpt2_colab.ipynb` or `train_gpt2.py` for the supported pipeline and shared corpus definition.
 
 <details>
 <summary>Original project description and training notes</summary>
