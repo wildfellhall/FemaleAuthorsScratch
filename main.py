@@ -30,9 +30,9 @@ class TrainConfig:
     vocab_size: int = 32768
     min_frequency: int = 2
     context_length: int = 2048
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    n_layer: int = 10
+    n_head: int = 8
+    n_embd: int = 512
     dropout: float = 0.1
     batch_size: int = 4  # 32 windows/update keeps the token batch near 65K at 2K context
     gradient_accumulation: int = 8
