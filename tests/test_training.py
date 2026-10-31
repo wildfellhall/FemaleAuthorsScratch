@@ -72,6 +72,20 @@ class TrainingTests(unittest.TestCase):
         self.assertNotIn("TrainerCallback", names)
         self.assertEqual(names["TrainConfig"]().sample_every, 100)
 
+    def test_extended_context_trains_positions_beyond_1024(self):
+        n = self.notebook
+        config = replace(n.config, context_length=n.TrainConfig().context_length)
+        model = n.make_model(config, n.tokenizer).train()
+        tokens = [n.tokenizer.bos_token_id] + [10] * (config.context_length - 2) + [n.tokenizer.eos_token_id]
+        batch = n.collate_windows([tokens], n.tokenizer.pad_token_id)
+        loss = model(**batch).loss
+        self.assertTrue(n.torch.isfinite(loss))
+        loss.backward()
+        self.assertGreater(float(model.transformer.wpe.weight.grad[1024:].abs().sum()), 0)
+        model.save_pretrained(self.root / "long-context")
+        loaded = n.GPT2LMHeadModel.from_pretrained(self.root / "long-context", local_files_only=True)
+        self.assertEqual(loaded.config.n_positions, config.context_length)
+
     def test_tokenizer_only_sees_training_books_and_preserves_unicode(self):
         n = self.notebook
         backend = n.ByteLevelBPETokenizer()

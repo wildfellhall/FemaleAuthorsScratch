@@ -29,12 +29,12 @@ from transformers import GPT2Config, GPT2LMHeadModel, PreTrainedTokenizerFast
 class TrainConfig:
     vocab_size: int = 32768
     min_frequency: int = 2
-    context_length: int = 1024
+    context_length: int = 2048
     n_layer: int = 12
     n_head: int = 12
     n_embd: int = 768
     dropout: float = 0.1
-    batch_size: int = 8
+    batch_size: int = 4  # 32 windows/update keeps the token batch near 65K at 2K context
     gradient_accumulation: int = 8
     epochs: int = 12  # ceiling; validation can stop training earlier
     max_steps: int = 0  # zero: derive the schedule from epochs and actual data size
@@ -43,8 +43,8 @@ class TrainConfig:
     warmup_fraction: float = 0.03
     min_lr_ratio: float = 0.1
     max_grad_norm: float = 1.0
-    eval_every: int = 200
-    eval_stride: int = 512
+    eval_every: int = 500  # also evaluate at every epoch end
+    eval_stride: int = 1024
     early_stopping_patience: int = 3  # full epochs without a meaningful improvement
     early_stopping_min_delta: float = 0.002
     save_every: int = 100
@@ -105,6 +105,7 @@ config.validate()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # %% Cell 2: Corpus list and cleaning rules
+# Synced from CorpusCollection/femalecorpus.py at f6fe26fd (2026-10-30).
 
 sources = [
     "https://www.gutenberg.org/files/1342/1342-0.txt",   #Pride and Prejudice by Jane Austen
@@ -155,6 +156,32 @@ sources = [
     "https://www.gutenberg.org/files/3322/3322-0.txt",   #East Lynne by Mrs. Henry Wood
     "https://www.gutenberg.org/files/15627/15627-0.txt", #Verner's Pride by Mrs. Henry Wood
     "https://www.gutenberg.org/files/34587/34587-0.txt", #Mrs. Halliburton's Troubles by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58188/58188-0.txt", #Oswald Cray: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/38832/38832-0.txt", #A Life's Secret: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/57875/57875-0.txt", #Anne Hereford: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58086/58086-0.txt", #Roland Yorke by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/36106/36106-0.txt", #Trevlyn Hold: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/42200/42200-0.txt", #The Shadow of Ashlydyat by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/9192/9192-0.txt",   #The Channings: A Story by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58582/58582-0.txt", #St. Martin's Eve: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58431/58431-0.txt", #Orville College: A Story by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/59144/59144-0.txt", #The Master of Greylands: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/39692/39692-0.txt", #Mildred Arkell: A Novel. Vol. 1 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/39377/39377-0.txt", #Mildred Arkell: A Novel. Vol. 2 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/39693/39693-0.txt", #Mildred Arkell: A Novel. Vol. 3 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/40418/40418-0.txt", #It May Be True, Vol. 1 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/39192/39192-0.txt", #It May Be True, Vol. 2 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/39193/39193-0.txt", #It May Be True, Vol. 3 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/38623/38623-0.txt", #The Story of Charles Strange: A Novel. Vol. 1 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/38624/38624-0.txt", #The Story of Charles Strange: A Novel. Vol. 2 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/38625/38625-0.txt", #The Story of Charles Strange: A Novel. Vol. 3 (of 3) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58345/58345-0.txt", #Within the Maze: A Novel, Vol. 1 (of 2) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58346/58346-0.txt", #Within the Maze: A Novel, Vol. 2 (of 2) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58046/58046-0.txt", #The Red Court Farm: A Novel (Vol. 1 of 2) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58047/58047-0.txt", #The Red Court Farm: A Novel (Vol. 2 of 2) by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58774/58774-0.txt", #Court Netherleigh: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58288/58288-0.txt", #Bessy Rane: A Novel by Mrs. Henry Wood
+    "https://www.gutenberg.org/files/58701/58701-0.txt", #Edina: A Novel by Mrs. Henry Wood
     "https://www.gutenberg.org/files/22121/22121-0.txt", #Olive: A Novel by Dinah Maria Mulock Craik
     "https://www.gutenberg.org/files/45975/45975-0.txt", #The Little Lame Prince and His Travelling Cloak by Dinah Maria Mulock Craik
     "https://www.gutenberg.org/files/21767/21767-0.txt", #Agatha's Husband: A Novel by Dinah Maria Mulock Craik
@@ -404,7 +431,7 @@ sources = [
     "https://www.gutenberg.org/files/53645/53645-0.txt", #Heart and Cross by Mrs. Oliphant
     "https://www.gutenberg.org/files/66376/66376-0.txt", #Young Musgrave by Mrs. Oliphant
     "https://www.gutenberg.org/files/63903/63903-0.txt", #The Duke's Daughter; and, The Fugitives; vol. 3/3 by Mrs. Oliphant
-    "https://www.gutenberg.org/files/66376/66376-0.txt", #Sir Tom by Mrs. Oliphant
+    "https://www.gutenberg.org/files/30692/30692-0.txt", #Sir Tom by Mrs. Oliphant (corrected Gutenberg ID)
     "https://www.gutenberg.org/files/47618/47618-0.txt", #At His Gates: A Novel. Vol. 1 (of 3) by Mrs. Oliphant
     "https://www.gutenberg.org/files/74734/74734-0.txt", #Caleb Field : A tale of the Puritans by Mrs. Oliphant
     "https://www.gutenberg.org/files/61782/61782-0.txt", #A Poor Gentleman by Mrs. Oliphant
@@ -577,7 +604,7 @@ sources = [
     "https://www.gutenberg.org/files/65290/65290-0.txt", #Among the Lindens by Evelyn Raymond
     "https://www.gutenberg.org/files/67567/67567-0.txt", #The Little Lady of the Horse by Evelyn Raymond
     "https://www.gutenberg.org/files/65223/65223-0.txt", #Mixed Pickles by Evelyn Raymond
-    "https://www.gutenberg.org/files/15546/15546-0.txt", #The Last of the Peterkins by Lucretia P. Hale 
+    "https://www.gutenberg.org/files/15546/15546-0.txt", #The Last of the Peterkins by Lucretia P. Hale
     "https://www.gutenberg.org/files/22052/22052-0.txt", #Standish of Standish: A Story of the Pilgrims by Jane G. Austin
     "https://www.gutenberg.org/files/67608/67608-0.txt", #Betty Alden: The first-born daughter of the Pilgrims by Jane G. Austin
     "https://www.gutenberg.org/files/4676/4676-0.txt",   #Outpost by Jane G. Austin
@@ -607,6 +634,82 @@ sources = [
     "https://www.gutenberg.org/files/28524/28524-0.txt", #Nobody by Susan Warner
     "https://www.gutenberg.org/files/30149/30149-0.txt", #Trading by Susan Warner
     "https://www.gutenberg.org/files/16918/16918-0.txt", #Hills of the Shatemuc by Susan Warner
+    "https://www.gutenberg.org/files/8954/8954-0.txt",   #Lady Audley's Secret by M. E. Braddon
+    "https://www.gutenberg.org/files/75840/75840-0.txt", #The trail of the serpent by M. E. Braddon
+    "https://www.gutenberg.org/files/11720/11720-0.txt", #Fenton's Quest by M. E. Braddon
+    "https://www.gutenberg.org/files/9189/9189-0.txt",   #Henry Dunbar: A Novel by M. E. Braddon
+    "https://www.gutenberg.org/files/35485/35485-0.txt", #The Doctor's Wife: A Novel by M. E. Braddon
+    "https://www.gutenberg.org/files/9475/9475-0.txt",   #The Lovels of Arden by M. E. Braddon
+    "https://www.gutenberg.org/files/50037/50037-0.txt", #Wyllard's Weird: A Novel by M. E. Braddon
+    "https://www.gutenberg.org/files/70938/70938-0.txt", #The day will come : a novel by M. E. Braddon
+    "https://www.gutenberg.org/files/48020/48020-0.txt", #Aurora Floyd, Vol. 1 by M. E. Braddon
+    "https://www.gutenberg.org/files/48021/48021-0.txt", #Aurora Floyd, Vol. 2 by M. E. Braddon
+    "https://www.gutenberg.org/files/48022/48022-0.txt", #Aurora Floyd, Vol. 3 by M. E. Braddon
+    "https://www.gutenberg.org/files/57405/57405-0.txt", #All along the River: A Novel by M. E. Braddon
+    "https://www.gutenberg.org/files/10905/10905-0.txt", #Phantom Fortune, a Novel by M. E. Braddon
+    "https://www.gutenberg.org/files/74385/74385-0.txt", #The Venetians : A novel by M. E. Braddon
+    "https://www.gutenberg.org/files/9052/9052-0.txt",   #The Golden Calf by M. E. Braddon
+    "https://www.gutenberg.org/files/9377/9377-0.txt",   #London Pride, Or, When the World Was Younger by M. E. Braddon
+    "https://www.gutenberg.org/files/34542/34542-0.txt", #John Marchmont's Legacy, Volumes 1-3 by M. E. Braddon
+    "https://www.gutenberg.org/files/73931/73931-0.txt", #The cloven foot : A novel by M. E. Braddon
+    "https://www.gutenberg.org/files/74484/74484-0.txt", #The Octoroon by M. E. Braddon
+    "https://www.gutenberg.org/files/9362/9362-0.txt",   #Birds of Prey by M. E. Braddon
+    "https://www.gutenberg.org/files/76927/76927-0.txt", #Only a clod by M. E. Braddon
+    "https://www.gutenberg.org/files/9102/9102-0.txt",   #Run to Earth: A Novel by M. E. Braddon
+    "https://www.gutenberg.org/files/26236/26236-0.txt", #Vixen, Volume I. by M. E. Braddon
+    "https://www.gutenberg.org/files/26237/26237-0.txt", #Vixen, Volume II. by M. E. Braddon
+    "https://www.gutenberg.org/files/26238/26238-0.txt", #Vixen, Volume III. by M. E. Braddon
+    "https://www.gutenberg.org/files/75125/75125-0.txt", #Eleanor's victory by M. E. Braddon
+    "https://www.gutenberg.org/files/71631/71631-0.txt", #His darling sin by M. E. Braddon
+    "https://www.gutenberg.org/files/76502/76502-0.txt", #The lady's mile : a novel by M. E. Braddon
+    "https://www.gutenberg.org/files/9259/9259-0.txt",   #Charlotte's Inheritance by M. E. Braddon
+    "https://www.gutenberg.org/files/75410/75410-0.txt", #The fatal three, vol. I by M. E. Braddon
+    "https://www.gutenberg.org/files/75411/75411-0.txt", #The fatal three, vol. II by M. E. Braddon
+    "https://www.gutenberg.org/files/75412/75412-0.txt", #The fatal three, vol. III by M. E. Braddon
+    "https://www.gutenberg.org/files/75506/75506-0.txt", #Asphodel : a novel by M. E. Braddon
+    "https://www.gutenberg.org/files/75875/75875-0.txt", #Lucius Davoren; or, Publicans and sinners, vol. 1 by M. E. Braddon
+    "https://www.gutenberg.org/files/75876/75876-0.txt", #Lucius Davoren; or, Publicans and sinners, vol. 2 by M. E. Braddon
+    "https://www.gutenberg.org/files/75877/75877-0.txt", #Lucius Davoren; or, Publicans and sinners, vol. 3 by M. E. Braddon
+    "https://www.gutenberg.org/files/77631/77631-0.txt", #Rupert Godwin : A novel by M. E. Braddon
+    "https://www.gutenberg.org/files/41339/41339-0.txt", #Mount Royal: A Novel. Volume 1 of 3 by M. E. Braddon
+    "https://www.gutenberg.org/files/67237/67237-0.txt", #An open verdict : a novel, volume 1 (of 3) by M. E. Braddon
+    "https://www.gutenberg.org/files/68040/68040-0.txt", #An open verdict : a novel, volume 3 (of 3) by M. E. Braddon
+    "https://www.gutenberg.org/files/57086/57086-0.txt", #A Strange World: A Novel. Volume 1 (of 3) by M. E. Braddon
+    "https://www.gutenberg.org/files/41374/41374-0.txt", #Mohawks: A Novel. Volume 1 of 3 by M. E. Braddon
+    "https://www.gutenberg.org/files/41375/41375-0.txt", #Mohawks: A Novel. Volume 2 of 3 by M. E. Braddon
+    "https://www.gutenberg.org/files/23641/23641-0.txt", #The Forsaken Inn: A Novel by Anna Katharine Green
+    "https://www.gutenberg.org/files/4047/4047-0.txt",   #The Leavenworth Case by Anna Katharine Green
+    "https://www.gutenberg.org/files/21617/21617-0.txt", #That Affair Next Door by Anna Katharine Green
+    "https://www.gutenberg.org/files/1167/1167-0.txt",   #A Strange Disappearance by Anna Katharine Green
+    "https://www.gutenberg.org/files/33301/33301-0.txt", #The Sword of Damocles: A Story of New York Life by Anna Katharine Green
+    "https://www.gutenberg.org/files/31681/31681-0.txt", #Hand and Ring by Anna Katharine Green
+    "https://www.gutenberg.org/files/5162/5162-0.txt",   #Agatha Webb by Anna Katharine Green
+    "https://www.gutenberg.org/files/33305/33305-0.txt", #Lost Man's Lane: A Second Episode in the Life of Amelia Butterworth by Green
+    "https://www.gutenberg.org/files/32439/32439-0.txt", #The Doctor, his Wife, and the Clock by Anna Katharine Green
+    "https://www.gutenberg.org/files/33695/33695-0.txt", #X Y Z: A Detective Story by Anna Katharine Green
+    "https://www.gutenberg.org/files/36758/36758-0.txt", #Cynthia Wakeham's Money by Anna Katharine Green
+    "https://www.gutenberg.org/files/22809/22809-0.txt", #The Hermit Of ——— Street by Anna Katharine Green
+    "https://www.gutenberg.org/files/56787/56787-0.txt", #7 to 12: A Detective Story by Anna Katharine Green
+    "https://www.gutenberg.org/files/57643/57643-0.txt", #Doctor Izard by Anna Katharine Green
+    "https://www.gutenberg.org/files/6805/6805-0.txt",   #The Mill Mystery by Anna Katharine Green
+    "https://www.gutenberg.org/files/22806/22806-0.txt", #The Bronze Hand by Anna Katharine Green
+    "https://www.gutenberg.org/files/24750/24750-0.txt", #Mizora: A Prophecy by Mary E. Bradley Lane
+    "https://www.gutenberg.org/files/770/770-0.txt",     #The Story of the Treasure Seekers by E. Nesbit
+    "https://www.gutenberg.org/files/40814/40814-0.txt", #Ruth Hall: A Domestic Tale of the Present Time by Fanny Fern
+    "https://www.gutenberg.org/files/41542/41542-0.txt", #Rose Clark by Fanny Fern
+    "https://www.gutenberg.org/files/1905/1905-0.txt",   #The Governess; Or, The Little Female Academy by Sarah Fielding
+    "https://www.gutenberg.org/files/79731/79731-0.txt", #On the edge of a moor by Amy Le Feuvre
+    "https://www.gutenberg.org/files/22243/22243-0.txt", #Dwell Deep; or, Hilda Thorn's Life Story by Amy Le Feuvre
+    "https://www.gutenberg.org/files/11470/11470-0.txt", #His big opportunity by Amy Le Feuvre
+    "https://www.gutenberg.org/files/22232/22232-0.txt", #The Carved Cupboard by Amy Le Feuvre
+    "https://www.gutenberg.org/files/10777/10777-0.txt", #Probable Sons by Amy Le Feuvre
+    "https://www.gutenberg.org/files/76174/76174-0.txt", #Legend-led by Amy Le Feuvre
+    "https://www.gutenberg.org/files/72454/72454-0.txt", #What the wind did by Amy Le Feuvre
+    "https://www.gutenberg.org/files/10880/10880-0.txt", #Teddy's Button by Amy Le Feuvre
+    "https://www.gutenberg.org/files/35538/35538-0.txt", #The Squatter and the Don by María Amparo Ruiz de Burton
+    "https://www.gutenberg.org/files/79593/79593-0.txt", #Work, wait, win by Ruth Lamb
+
+
 ]
 
 CLEANING_RULES = {}  # Example: {"123": {"raw_sha256": "...", "start": {"text": "CHAPTER I."}}}
@@ -655,10 +758,11 @@ def split_for(book_id: str, seed: str, validation: float, test: float) -> str:
     return "test" if value < test else "validation" if value < test + validation else "train"
 
 
-VERSION = "3.0"
+VERSION = "3.1"
 DEFAULT_MIRROR = "https://gutenberg.pglaf.org"
-START = re.compile(r"(?im)^[ \t]*\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*\*{3}[^\n]*$")
-END = re.compile(r"(?im)^[ \t]*\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*\*{3}[^\n]*$")
+# Long ebook titles can wrap onto up to two continuation lines inside the marker.
+START = re.compile(r"(?im)^[ \t]*\*{3}\s*START OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*(?:\n[^\n*]{1,120}){0,2}\*{3}[^\n]*$")
+END = re.compile(r"(?im)^[ \t]*\*{3}\s*END OF (?:THE|THIS) PROJECT GUTENBERG (?:EBOOK|ETEXT)\b[^\n]*(?:\n[^\n*]{1,120}){0,2}\*{3}[^\n]*$")
 LEGACY_END = re.compile(r"(?im)^[ \t]*End of (?:the )?Project Gutenberg(?:[’']s)?(?: (?:EBook|Etext))?\b[^\n]*$")
 
 
@@ -917,7 +1021,13 @@ def trim_to_narrative(text: str, rules: dict, audit: list) -> tuple[str, list[st
             problems.append("narrative_start_not_identified")
     end = anchor_position(text, rules["end"]) if "end" in rules else len(text)
     if "end" not in rules:
-        endings = [m for m in STORY_END.finditer(text) if m.start() > max(start, len(text) * .65)]
+        endings = []
+        for marker in STORY_END.finditer(text):
+            previous = text[:marker.start()].rstrip().rsplit("\n\n", 1)[-1].strip()
+            # "THE END" can be the title of a final chapter, not the end of its prose.
+            chapter_title = CHAPTER.fullmatch(previous) or re.fullmatch(r"[IVXLCDM]{1,8}[.)]?", previous)
+            if marker.start() > max(start, len(text) * .65) and not chapter_title:
+                endings.append(marker)
         if endings and not re.search(r"(?im)^\s*(?:EPILOGUE|CHAPTER|CHAP\.|LETTER|PART|BOOK)\b", text[endings[-1].end():]):
             end = endings[-1].end()
         editorial = [m for m in BACK_MATTER.finditer(text) if m.start() > max(start, len(text) * .65)]
@@ -1016,7 +1126,7 @@ def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow:
         note_ids.update(re.findall(r"(?m)^[ \t]*\[(\d{1,4}|[A-Z]|[*†‡])\]", body[note_sections[-1].end():]))
     body = strip_annotations(body, audit)
     # A terminal transcriber's section is safely bounded only near the end.
-    notes = list(re.finditer(r"(?im)^[ \t]*(?:[*_ ]*)TRANSCRIBER[’']?S?[ \t]+NOTES?[.: \t*_]*$", body))
+    notes = list(re.finditer(r"(?im)^(?:[ \t]*\+[-=+]{3,}\+[ \t]*\n(?:[ \t]*\n)*)?[ \t*_=#●•|+-]*TRANSCRIBER[’']?S?[ \t]+NOTES?(?:[ \t*_=#|]*[.:][^\n]*|[ \t*_=#|]*)$", body))
     if notes and notes[-1].start() > len(body) * 0.8:
         record_removal(audit, "terminal_transcriber_notes", body[notes[-1].start():])
         body = body[:notes[-1].start()]
@@ -1039,6 +1149,8 @@ def clean_book(data: bytes, rules: dict, keep_book_matter: bool = False, reflow:
         # Remove labelled or clearly paired notes; flag ambiguous references for review.
         body = strip_annotations(body, audit, footnotes=True)
         body = remove_linked_footnotes(body, audit)
+        body = substitute(body, r"(?im)^[ \t]*FOOTNOTES?[:. \t]*\n(?:[ \t]*\n)+(?=[ \t]*(?:CHAPTER|CHAP\.|LETTER|PART|BOOK)\b)",
+                          "empty_footnote_heading", audit)
         if note_ids:
             reference_pattern = r"\[(?:" + "|".join(re.escape(note) for note in sorted(note_ids)) + r")\]"
             body = substitute(body, reference_pattern, "defined_footnote_reference", audit)
@@ -1485,6 +1597,7 @@ def train(datasets, tokenizer, config, output, resume=False, max_seconds=0, devi
         print("No complete checkpoint yet; restarting this initialized run from its seed.", flush=True)
         # Tokenizer training may use its own RNG; model initialization uses the seed above.
     summary = {"parameters": sum(p.numel() for p in model.parameters()), "vocab_size": len(tokenizer),
+               "context_length": config.context_length, "maximum_epochs": config.epochs,
                "splits": {s: {"books": len(datasets[s].books), "target_tokens": sum(len(book) - 1 for book in datasets[s].books), "windows": len(datasets[s])} for s in datasets},
                "planned_optimizer_steps": total_steps, "steps_per_epoch": steps_per_epoch,
                "maximum_tokens_per_update": config.batch_size * config.gradient_accumulation * (config.context_length - 1), "hardware": hardware}

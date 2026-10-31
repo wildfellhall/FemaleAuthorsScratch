@@ -83,6 +83,13 @@ class CleaningTests(unittest.TestCase):
         self.assertEqual(report['metadata']['author'], 'Invented Author')
         self.assertEqual(report['problems'], [])
 
+    def test_gutenberg_marker_with_wrapped_title(self):
+        data = book_bytes().replace(b'EBOOK 123 ***', b'EBOOK A LONG INVENTED TITLE, VOLUME 1 (OF\n3) ***')
+        text, report = corpus.clean_book(data, {})
+        self.assertTrue(text.startswith('CHAPTER I.'))
+        self.assertNotIn('Gutenberg', text)
+        self.assertFalse(report['problems'])
+
     def test_toc_is_not_first_chapter(self):
         front = 'TITLE\nPublisher\n\nCONTENTS\n\nCHAPTER I.\nThe door\nCHAPTER II.\nThe garden\n\n'
         text, report = corpus.clean_book(book_bytes(front + NARRATIVE), {})
@@ -165,6 +172,33 @@ class CleaningTests(unittest.TestCase):
         self.assertNotIn('Illustration', text)
         self.assertNotIn('Spelling', text)
         self.assertEqual(report['problems'], [])
+
+    def test_decorated_and_inline_terminal_transcriber_notes(self):
+        for heading in ('=TRANSCRIBER’S NOTES=', '● Transcriber’s note:', '| Transcriber’s note: |',
+                        "Transcriber's note: Typographical errors silently corrected:"):
+            body = NARRATIVE + '\n\nTHE END.\n\n' + heading + '\n\nchapter 1: a spelling correction.'
+            text, report = corpus.clean_book(book_bytes(body), {})
+            self.assertNotIn('Transcriber', text)
+            self.assertNotIn('correction', text)
+            self.assertFalse(report['problems'])
+
+    def test_removed_note_does_not_leave_an_empty_heading(self):
+        body = NARRATIVE.replace('CHAPTER II.', 'FOOTNOTE:\n\n[Footnote 1: A note.]\n\nCHAPTER II.')
+        text, report = corpus.clean_book(book_bytes(body), {})
+        self.assertNotIn('FOOTNOTE', text)
+        self.assertIn('CHAPTER II.', text)
+        self.assertFalse(report['problems'])
+
+    def test_chapter_named_the_end_keeps_its_narrative(self):
+        for heading in ('CHAPTER III.', 'III.'):
+            body = NARRATIVE * 3 + '\n\n' + heading + '\n\nTHE END.\n\n'
+            body += PARAGRAPH + '\n\nHer last letter arrived with the morning post.'
+            body += '\n\n+---------------------+\n| Transcriber’s note: |\n\nA corrected spelling.'
+            text, report = corpus.clean_book(book_bytes(body), {})
+            self.assertIn('Her last letter arrived with the morning post.', text)
+            self.assertNotIn('corrected spelling', text)
+            self.assertNotIn('+---------------------+', text)
+            self.assertFalse(report['problems'])
 
     def test_footnotes_are_removed_or_flagged(self):
         data = book_bytes(NARRATIVE + '\n\n[Footnote 1: An explanatory note.]')

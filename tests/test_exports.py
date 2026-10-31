@@ -106,7 +106,7 @@ class GGUFTests(unittest.TestCase):
         cls.tokenizer.save_pretrained(cls.root / "model")
         with torch.random.fork_rng():
             torch.manual_seed(7)
-            cls.model = GPT2LMHeadModel(GPT2Config(vocab_size=len(cls.tokenizer), n_positions=64, n_ctx=64,
+            cls.model = GPT2LMHeadModel(GPT2Config(vocab_size=len(cls.tokenizer), n_positions=2048, n_ctx=2048,
                 n_layer=2, n_head=2, n_embd=32, bos_token_id=0, eos_token_id=0, pad_token_id=1)).eval()
         cls.model.save_pretrained(cls.root / "model")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -123,6 +123,7 @@ class GGUFTests(unittest.TestCase):
         self.assertEqual(scalar("tokenizer.ggml.eos_token_id"), 0)
         self.assertEqual(scalar("tokenizer.ggml.padding_token_id"), 1)
         self.assertFalse(scalar("tokenizer.ggml.add_bos_token"))
+        self.assertEqual(scalar("gpt2.context_length"), self.model.config.n_positions)
         field = reader.fields["tokenizer.ggml.tokens"]
         tokens = [field.parts[index].tobytes().decode() for index in field.data]
         self.assertEqual(tokens, [self.tokenizer.convert_ids_to_tokens(i) for i in range(len(self.tokenizer))])
@@ -169,13 +170,14 @@ class GGUFTests(unittest.TestCase):
         import numpy as np
         import torch
         from llama_cpp import Llama
-        llm = Llama(model_path=str(self.path), n_ctx=64, n_batch=64, n_threads=1,
+        llm = Llama(model_path=str(self.path), n_ctx=self.model.config.n_positions, n_batch=2048, n_threads=1,
                     n_gpu_layers=0, verbose=False, logits_all=True)
         self.addCleanup(llm.close)
         for text in ("Mira opened", " Café — 1234\nShe's here!", " 漢字🙂", "a\t\n b"):
             self.assertEqual(self.tokenizer.encode(text, add_special_tokens=False),
                              llm.tokenize(text.encode(), add_bos=False, special=False))
-        ids = self.tokenizer.encode("Mira opened", add_special_tokens=False)
+        ids = (self.tokenizer.encode("Mira opened", add_special_tokens=False) * 600)[:1536]
+        self.assertGreater(len(ids), 1024)
         with torch.inference_mode():
             expected = self.model(torch.tensor([ids])).logits[0, -1].numpy()
         llm.eval(ids)
